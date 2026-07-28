@@ -1,14 +1,25 @@
-name: CI and Deploy
+name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -27,33 +38,39 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Upload build artifact
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
+      - name: Prepare GitHub Pages files
+        run: |
+          if [ -d ".output/public" ]; then
+            mkdir -p ./gh-pages
+            cp -r .output/public/* ./gh-pages/
+          elif [ -d "dist" ]; then
+            mkdir -p ./gh-pages
+            cp -r dist/* ./gh-pages/
+          else
+            echo "Build output not found"
+            exit 1
+          fi
+
+          # SPA/TanStack Router deep link desteği için
+          cp ./gh-pages/index.html ./gh-pages/404.html
+
+          # GitHub Pages Jekyll işlemeyi kapat
+          touch ./gh-pages/.nojekyll
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: dist
-          path: dist
+          path: ./gh-pages
 
   deploy:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    permissions:
-      contents: read
-      deployments: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist
-
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: servistakip
-          directory: dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

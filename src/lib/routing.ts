@@ -7,7 +7,9 @@ export interface RouteResult {
 }
 
 // OSRM üzerinden çoklu-nokta rota hesapla
-export async function getRoute(points: { lat: number; lng: number }[]): Promise<RouteResult | null> {
+export async function getRoute(
+  points: { lat: number; lng: number }[],
+): Promise<RouteResult | null> {
   if (points.length < 2) return null;
   const coords = points.map((p) => `${p.lng},${p.lat}`).join(";");
   const url = `${OSRM_BASE}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
@@ -17,9 +19,10 @@ export async function getRoute(points: { lat: number; lng: number }[]): Promise<
     const data = await res.json();
     const r = data.routes?.[0];
     if (!r) return null;
-    const path: [number, number][] = r.geometry.coordinates.map(
-      ([lng, lat]: [number, number]) => [lat, lng],
-    );
+    const path: [number, number][] = r.geometry.coordinates.map(([lng, lat]: [number, number]) => [
+      lat,
+      lng,
+    ]);
     return { path, distanceM: r.distance, durationS: r.duration };
   } catch {
     return null;
@@ -48,9 +51,6 @@ export function formatEta(seconds: number): { minutes: number; secs: number; tex
   const total = Math.max(0, Math.round(seconds));
   const minutes = Math.floor(total / 60);
   const secs = total % 60;
-  const text =
-    minutes > 0
-      ? `${minutes} dakika ${secs} saniye`
-      : `${secs} saniye`;
+  const text = minutes > 0 ? `${minutes} dakika ${secs} saniye` : `${secs} saniye`;
   return { minutes, secs, text };
 }

@@ -3,21 +3,42 @@ import { useEffect, useState } from "react";
 import { ClientOnly } from "@/components/ClientOnly";
 import MapView from "@/components/MapView";
 import { getRoute } from "@/lib/routing";
-import { addStop, deleteStop, getStops, moveStop, toggleStopKind, type Stop, type StopKind } from "@/lib/stops";
+import {
+  addStop,
+  deleteStop,
+  getStops,
+  moveStop,
+  toggleStopKind,
+  type Stop,
+  type StopKind,
+} from "@/lib/stops";
 
 export const Route = createFileRoute("/admin")({
   head: () => ({
     meta: [
       { title: "Durak Yönetimi – Acrob Elektroland" },
-      { name: "description", content: "Servis güzergâhındaki durakları ekleyin, silin ve sıralayın." },
+      {
+        name: "description",
+        content: "Servis güzergâhındaki durakları ekleyin, silin ve sıralayın.",
+      },
       { property: "og:title", content: "Durak Yönetimi – Acrob Elektroland" },
-      { property: "og:description", content: "Acrob Elektroland servis güzergâhını duraklar ve yol noktalarıyla harita üzerinde yönetin." },
+      {
+        property: "og:description",
+        content:
+          "Acrob Elektroland servis güzergâhını duraklar ve yol noktalarıyla harita üzerinde yönetin.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: () => (
-    <ClientOnly fallback={<div className="min-h-screen flex items-center justify-center text-muted-foreground">Yükleniyor...</div>}>
+    <ClientOnly
+      fallback={
+        <div className="min-h-screen flex items-center justify-center text-muted-foreground">
+          Yükleniyor...
+        </div>
+      }
+    >
       <AdminApp />
     </ClientOnly>
   ),
@@ -54,8 +75,10 @@ function AdminApp() {
     const lngN = parseFloat(lng);
     const finalName = name.trim() || (kind === "waypoint" ? "ROTA" : "");
     if (!finalName) return setError("Durak adı boş olamaz.");
-    if (!Number.isFinite(latN) || !Number.isFinite(lngN)) return setError("Enlem ve boylam sayı olmalı.");
-    if (latN < -90 || latN > 90 || lngN < -180 || lngN > 180) return setError("Koordinat aralığı geçersiz.");
+    if (!Number.isFinite(latN) || !Number.isFinite(lngN))
+      return setError("Enlem ve boylam sayı olmalı.");
+    if (latN < -90 || latN > 90 || lngN < -180 || lngN > 180)
+      return setError("Koordinat aralığı geçersiz.");
     setStops(addStop({ name: finalName, lat: latN, lng: lngN, kind }));
     setName("");
     setLat("");
@@ -74,7 +97,9 @@ function AdminApp() {
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-border bg-card/50 backdrop-blur">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center gap-3">
-          <Link to="/" className="hud-label hover:text-primary">← Ana Sayfa</Link>
+          <Link to="/" className="hud-label hover:text-primary">
+            ← Ana Sayfa
+          </Link>
           <div className="flex-1 text-center">
             <h1 className="text-lg font-bold">DURAK YÖNETİMİ</h1>
           </div>
@@ -87,7 +112,8 @@ function AdminApp() {
           <form onSubmit={handleAdd} className="panel p-5 space-y-3">
             <div className="hud-label">Yeni Durak Ekle</div>
             <div className="text-xs text-primary bg-primary/10 border border-primary/30 rounded-md p-2">
-              💡 İpucu: Haritada istediğin noktaya <strong>tıkla</strong>, koordinat otomatik dolar. Sonra durak adını yaz ve ekle.
+              💡 İpucu: Haritada istediğin noktaya <strong>tıkla</strong>, koordinat otomatik dolar.
+              Sonra durak adını yaz ve ekle.
             </div>
             <div className="grid grid-cols-2 gap-2">
               <button
@@ -138,17 +164,25 @@ function AdminApp() {
 
           <div className="panel p-4">
             <div className="hud-label mb-3">
-              Güzergâh ({stops.filter((s) => s.kind === "stop").length} durak · {stops.filter((s) => s.kind === "waypoint").length} rota noktası)
+              Güzergâh ({stops.filter((s) => s.kind === "stop").length} durak ·{" "}
+              {stops.filter((s) => s.kind === "waypoint").length} rota noktası)
             </div>
             <ul className="space-y-2">
               {stops.map((s) => (
-                <li key={s.id} className={`flex items-center gap-2 rounded-md p-2 ${s.kind === "waypoint" ? "bg-secondary/20 opacity-70" : "bg-secondary/50"}`}>
-                  <div className={`w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center ${s.kind === "waypoint" ? "bg-muted text-muted-foreground" : "bg-primary text-primary-foreground"}`}>
+                <li
+                  key={s.id}
+                  className={`flex items-center gap-2 rounded-md p-2 ${s.kind === "waypoint" ? "bg-secondary/20 opacity-70" : "bg-secondary/50"}`}
+                >
+                  <div
+                    className={`w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center ${s.kind === "waypoint" ? "bg-muted text-muted-foreground" : "bg-primary text-primary-foreground"}`}
+                  >
                     {s.order}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="font-semibold truncate">
-                      {s.kind === "waypoint" && <span className="text-muted-foreground mr-1">•</span>}
+                      {s.kind === "waypoint" && (
+                        <span className="text-muted-foreground mr-1">•</span>
+                      )}
                       {s.name}
                     </div>
                     <div className="text-xs text-muted-foreground font-mono">
@@ -190,9 +224,7 @@ function AdminApp() {
                 </li>
               ))}
               {stops.length === 0 && (
-                <li className="text-sm text-muted-foreground text-center py-4">
-                  Henüz durak yok.
-                </li>
+                <li className="text-sm text-muted-foreground text-center py-4">Henüz durak yok.</li>
               )}
             </ul>
           </div>

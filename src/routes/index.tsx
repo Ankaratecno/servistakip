@@ -11,9 +11,17 @@ export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "Servis Takip – Acrob Elektroland" },
-      { name: "description", content: "Servisin durağınıza kaç dakika sonra geleceğini canlı görün. Ankara güzergâhı, gerçek zamanlı konum ve hız takibi." },
+      {
+        name: "description",
+        content:
+          "Servisin durağınıza kaç dakika sonra geleceğini canlı görün. Ankara güzergâhı, gerçek zamanlı konum ve hız takibi.",
+      },
       { property: "og:title", content: "Servis Takip – Acrob Elektroland" },
-      { property: "og:description", content: "06 FNJ 165 Volkswagen Crafter servisinin canlı konumunu ve durağınıza kalan süreyi görün." },
+      {
+        property: "og:description",
+        content:
+          "06 FNJ 165 Volkswagen Crafter servisinin canlı konumunu ve durağınıza kalan süreyi görün.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -71,7 +79,9 @@ function PassengerGate() {
       <main className="flex-1 flex items-center justify-center p-4">
         <form onSubmit={submit} className="panel p-8 w-full max-w-md">
           <div className="hud-label mb-2">Servis Aracı</div>
-          <div className="text-lg font-bold">{SERVICE_INFO.vehicle} · {SERVICE_INFO.year}</div>
+          <div className="text-lg font-bold">
+            {SERVICE_INFO.vehicle} · {SERVICE_INFO.year}
+          </div>
           <div className="text-xs text-muted-foreground mb-6">{SERVICE_INFO.operator}</div>
 
           <label className="hud-label block mb-2">Plaka</label>
@@ -93,8 +103,12 @@ function PassengerGate() {
             SERVİSİ TAKİP ET
           </button>
           <div className="mt-6 pt-4 border-t border-border flex justify-between text-xs">
-            <Link to="/driver" className="text-muted-foreground hover:text-primary">→ Şoför Girişi</Link>
-            <Link to="/admin" className="text-muted-foreground hover:text-primary">→ Durak Yönetimi</Link>
+            <Link to="/driver" className="text-muted-foreground hover:text-primary">
+              → Şoför Girişi
+            </Link>
+            <Link to="/admin" className="text-muted-foreground hover:text-primary">
+              → Durak Yönetimi
+            </Link>
           </div>
         </form>
       </main>
@@ -260,7 +274,8 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
                   <span className="text-lg text-muted-foreground">saniye</span>
                 </div>
                 <p className="text-sm text-muted-foreground mt-3">
-                  sonra <span className="text-foreground font-semibold">{selectedStop?.name}</span> durağınızda.
+                  sonra <span className="text-foreground font-semibold">{selectedStop?.name}</span>{" "}
+                  durağınızda.
                 </p>
                 {eta && (
                   <p className="text-xs text-muted-foreground mt-2 font-mono">
@@ -311,9 +326,13 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       </main>
 
       <footer className="text-center text-xs text-muted-foreground py-4 border-t border-border">
-        <Link to="/driver" className="hover:text-primary mx-2">Şoför Girişi</Link>
+        <Link to="/driver" className="hover:text-primary mx-2">
+          Şoför Girişi
+        </Link>
         ·
-        <Link to="/admin" className="hover:text-primary mx-2">Durak Yönetimi</Link>
+        <Link to="/admin" className="hover:text-primary mx-2">
+          Durak Yönetimi
+        </Link>
       </footer>
     </div>
   );

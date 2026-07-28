@@ -126,10 +126,10 @@ export default function MapView({
         keyboard: !isWaypoint,
       })
         .addTo(layers)
-        .bindTooltip(
-          isWaypoint ? `Rota noktası #${s.order}` : `${s.order}. ${s.name}`,
-          { permanent: false, direction: "top" },
-        );
+        .bindTooltip(isWaypoint ? `Rota noktası #${s.order}` : `${s.order}. ${s.name}`, {
+          permanent: false,
+          direction: "top",
+        });
     });
 
     if (stops.length > 0) {

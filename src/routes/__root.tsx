@@ -78,9 +78,16 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Acrob Elektroland – Servis Takip" },
-      { name: "description", content: "Ankara servis güzergâhı canlı takip sistemi. Volkswagen Crafter 06 FNJ 165 aracının konumunu ve durağınıza kalan süreyi gerçek zamanlı görün." },
+      {
+        name: "description",
+        content:
+          "Ankara servis güzergâhı canlı takip sistemi. Volkswagen Crafter 06 FNJ 165 aracının konumunu ve durağınıza kalan süreyi gerçek zamanlı görün.",
+      },
       { property: "og:title", content: "Acrob Elektroland – Servis Takip" },
-      { property: "og:description", content: "Ankara servis güzergâhı canlı takip: konum, hız ve durağınıza kalan süre." },
+      {
+        property: "og:description",
+        content: "Ankara servis güzergâhı canlı takip: konum, hız ve durağınıza kalan süre.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],

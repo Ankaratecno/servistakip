@@ -11,15 +11,27 @@ export const Route = createFileRoute("/driver")({
   head: () => ({
     meta: [
       { title: "Şoför Paneli – Acrob Elektroland" },
-      { name: "description", content: "Servis şoförü kontrol paneli. Plaka doğrulaması ile konum yayınını başlatın." },
+      {
+        name: "description",
+        content: "Servis şoförü kontrol paneli. Plaka doğrulaması ile konum yayınını başlatın.",
+      },
       { property: "og:title", content: "Şoför Paneli – Acrob Elektroland" },
-      { property: "og:description", content: "06 FNJ 165 servis aracı için konum yayını ve şoför kontrol paneli." },
+      {
+        property: "og:description",
+        content: "06 FNJ 165 servis aracı için konum yayını ve şoför kontrol paneli.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: () => (
-    <ClientOnly fallback={<div className="min-h-screen flex items-center justify-center text-muted-foreground">Yükleniyor...</div>}>
+    <ClientOnly
+      fallback={
+        <div className="min-h-screen flex items-center justify-center text-muted-foreground">
+          Yükleniyor...
+        </div>
+      }
+    >
       <DriverApp />
     </ClientOnly>
   ),
@@ -151,7 +163,9 @@ function DriverApp() {
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-border bg-card/50 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center gap-3">
-          <Link to="/" className="hud-label hover:text-primary">← Ana Sayfa</Link>
+          <Link to="/" className="hud-label hover:text-primary">
+            ← Ana Sayfa
+          </Link>
           <div className="flex-1 text-center">
             <h1 className="text-lg font-bold">ŞOFÖR PANELİ</h1>
           </div>
@@ -163,7 +177,9 @@ function DriverApp() {
         {!running ? (
           <div className="panel p-8 max-w-md mx-auto w-full">
             <div className="hud-label mb-2">Servis Bilgisi</div>
-            <div className="text-lg font-bold mb-1">{SERVICE_INFO.vehicle} {SERVICE_INFO.year}</div>
+            <div className="text-lg font-bold mb-1">
+              {SERVICE_INFO.vehicle} {SERVICE_INFO.year}
+            </div>
             <div className="text-xs text-muted-foreground mb-6">{SERVICE_INFO.operator}</div>
 
             <label className="hud-label block mb-2">Plaka Doğrulaması</label>
@@ -186,7 +202,8 @@ function DriverApp() {
               YAYINI BAŞLAT
             </button>
             <p className="text-xs text-muted-foreground mt-4 leading-relaxed">
-              "Başlat"a bastığınızda tarayıcı konum izni isteyecek. İzin verdikten sonra yolcular konumunuzu ve durağa kalan süreyi görebilecek. Bu sekmeyi <strong>açık tutun</strong>.
+              "Başlat"a bastığınızda tarayıcı konum izni isteyecek. İzin verdikten sonra yolcular
+              konumunuzu ve durağa kalan süreyi görebilecek. Bu sekmeyi <strong>açık tutun</strong>.
             </p>
           </div>
         ) : (
@@ -228,7 +245,11 @@ function DriverApp() {
             <div className="panel overflow-hidden flex-1 min-h-[400px]">
               <MapView
                 stops={stops}
-                busPosition={position ? { lat: position.coords.latitude, lng: position.coords.longitude } : null}
+                busPosition={
+                  position
+                    ? { lat: position.coords.latitude, lng: position.coords.longitude }
+                    : null
+                }
                 routePath={routePath}
                 className="h-full min-h-[400px]"
               />

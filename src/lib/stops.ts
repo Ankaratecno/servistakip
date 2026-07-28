@@ -28,11 +28,11 @@ const SEED: Array<Omit<Stop, "id" | "order">> = [
   { name: "3.DURAK", lat: 39.9907, lng: 32.6395, kind: "stop" },
   { name: "ROTA", lat: 39.9874, lng: 32.6453, kind: "waypoint" },
   { name: "4.DURAK", lat: 39.9807, lng: 32.6488, kind: "stop" },
-  { name: "ROTA", lat: 39.9695, lng: 32.6520, kind: "waypoint" },
+  { name: "ROTA", lat: 39.9695, lng: 32.652, kind: "waypoint" },
   { name: "ROTA", lat: 39.9641, lng: 32.6452, kind: "waypoint" },
-  { name: "5.DURAK", lat: 39.9396, lng: 32.6240, kind: "stop" },
+  { name: "5.DURAK", lat: 39.9396, lng: 32.624, kind: "stop" },
   { name: "6.DURAK", lat: 39.8674, lng: 32.6387, kind: "stop" },
-  { name: "7.DURAK", lat: 39.8700, lng: 32.6427, kind: "stop" },
+  { name: "7.DURAK", lat: 39.87, lng: 32.6427, kind: "stop" },
   { name: "8.DURAK", lat: 39.7759, lng: 32.6729, kind: "stop" },
   { name: "ELOKTROLAND", lat: 39.7405, lng: 32.8095, kind: "stop" },
 ];
@@ -96,9 +96,7 @@ export function moveStop(id: string, direction: "up" | "down"): Stop[] {
 
 export function toggleStopKind(id: string): Stop[] {
   const stops: Stop[] = getStops().map((s) =>
-    s.id === id
-      ? { ...s, kind: (s.kind === "stop" ? "waypoint" : "stop") as StopKind }
-      : s,
+    s.id === id ? { ...s, kind: (s.kind === "stop" ? "waypoint" : "stop") as StopKind } : s,
   );
   saveStops(stops);
   return stops;

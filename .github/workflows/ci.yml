@@ -32,22 +32,20 @@ jobs:
       - name: Lint
         run: bun run lint
 
-      - name: Build
-        run: bun run build
+      - name: Build static site (SPA)
+        env:
+          PAGES_BASE: /${{ github.event.repository.name }}/
+        run: bun run build:pages
 
       - name: Collect static output
         run: |
           set -e
-          if [ -d ".output/public" ]; then SRC=".output/public";
-          elif [ -d "dist/client" ]; then SRC="dist/client";
-          elif [ -d "dist" ]; then SRC="dist";
-          else echo "Build cikti klasoru bulunamadi"; exit 1; fi
-          echo "Kullanilan klasor: $SRC"
+          test -f dist-pages/index.html || { echo "index.html bulunamadi"; exit 1; }
           rm -rf ./_site && mkdir -p ./_site
-          cp -r "$SRC"/. ./_site/
+          cp -r dist-pages/. ./_site/
           touch ./_site/.nojekyll
           # SPA fallback: alt sayfalar (/driver, /admin) yenilenince 404 olmasin
-          if [ -f ./_site/index.html ]; then cp ./_site/index.html ./_site/404.html; fi
+          cp ./_site/index.html ./_site/404.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

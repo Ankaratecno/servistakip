@@ -3,8 +3,6 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -13,13 +11,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: github-pages
-  cancel-in-progress: false
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -38,38 +35,34 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Prepare GitHub Pages files
+      - name: Collect static output
         run: |
-          if [ -d ".output/public" ]; then
-            mkdir -p ./gh-pages
-            cp -r .output/public/* ./gh-pages/
-          elif [ -d "dist" ]; then
-            mkdir -p ./gh-pages
-            cp -r dist/* ./gh-pages/
-          else
-            echo "Build output not found"
-            exit 1
-          fi
+          set -e
+          if [ -d ".output/public" ]; then SRC=".output/public";
+          elif [ -d "dist/client" ]; then SRC="dist/client";
+          elif [ -d "dist" ]; then SRC="dist";
+          else echo "Build cikti klasoru bulunamadi"; exit 1; fi
+          echo "Kullanilan klasor: $SRC"
+          rm -rf ./_site && mkdir -p ./_site
+          cp -r "$SRC"/. ./_site/
+          touch ./_site/.nojekyll
+          # SPA fallback: alt sayfalar (/driver, /admin) yenilenince 404 olmasin
+          if [ -f ./_site/index.html ]; then cp ./_site/index.html ./_site/404.html; fi
 
-          # SPA/TanStack Router deep link desteği için
-          cp ./gh-pages/index.html ./gh-pages/404.html
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
-          # GitHub Pages Jekyll işlemeyi kapat
-          touch ./gh-pages/.nojekyll
-
-      - name: Upload GitHub Pages artifact
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./gh-pages
+          path: ./_site
 
   deploy:
-    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

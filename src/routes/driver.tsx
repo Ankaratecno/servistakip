@@ -38,7 +38,7 @@ export const Route = createFileRoute("/driver")({
 });
 
 function DriverApp() {
-  const [plate, setPlate] = useState("");
+  const [plate] = useState(SERVICE_INFO.plate);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [position, setPosition] = useState<GeolocationPosition | null>(null);
@@ -182,13 +182,13 @@ function DriverApp() {
             </div>
             <div className="text-xs text-muted-foreground mb-6">{SERVICE_INFO.operator}</div>
 
-            <label className="hud-label block mb-2">Plaka Doğrulaması</label>
+            <label className="hud-label block mb-2">Plaka (sabit)</label>
             <input
               type="text"
               value={plate}
-              onChange={(e) => setPlate(e.target.value)}
-              placeholder="06 FNJ 165"
-              className="w-full bg-input border border-border rounded-md px-4 py-4 text-xl font-mono font-bold uppercase focus:outline-none focus:ring-2 focus:ring-primary"
+              readOnly
+              aria-readonly="true"
+              className="w-full bg-input border border-border rounded-md px-4 py-4 text-xl font-mono font-bold uppercase text-primary cursor-not-allowed focus:outline-none"
             />
             {error && (
               <div className="mt-3 text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-md p-3">

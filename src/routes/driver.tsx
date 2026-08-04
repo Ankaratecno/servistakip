@@ -5,7 +5,15 @@ import { ClientOnly } from "@/components/ClientOnly";
 import MapView from "@/components/MapView";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
-import { getRoute } from "@/lib/routing";
+import { getRoute, haversineM } from "@/lib/routing";
+import {
+  avgSpeedKmh,
+  loadStats,
+  resetStats,
+  saveStats,
+  EMPTY_STATS,
+  type TripStats,
+} from "@/lib/trip-stats";
 
 export const Route = createFileRoute("/driver")({
   head: () => ({
@@ -46,6 +54,9 @@ function DriverApp() {
   const [connCount, setConnCount] = useState(0);
   const [stops] = useState<Stop[]>(() => getStops());
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
+  const [stats, setStats] = useState<TripStats>(EMPTY_STATS);
+  const statsRef = useRef<TripStats>(EMPTY_STATS);
+  const lastFixRef = useRef<{ lat: number; lng: number; ts: number } | null>(null);
 
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<Set<DataConnection>>(new Set());
@@ -54,6 +65,14 @@ function DriverApp() {
   useEffect(() => {
     if (stops.length >= 2) getRoute(stops).then((r) => r && setRoutePath(r.path));
   }, [stops]);
+
+  // Kalıcı istatistikleri IndexedDB'den yükle
+  useEffect(() => {
+    loadStats().then((s) => {
+      statsRef.current = s;
+      setStats(s);
+    });
+  }, []);
 
   const start = () => {
     setError(null);
@@ -107,11 +126,39 @@ function DriverApp() {
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         setPosition(pos);
+        // --- Kalıcı sürüş istatistikleri (IndexedDB) ---
+        const now = pos.timestamp || Date.now();
+        const cur = { lat: pos.coords.latitude, lng: pos.coords.longitude, ts: now };
+        const prev = lastFixRef.current;
+        const gpsSpeed = pos.coords.speed ? Math.max(0, pos.coords.speed * 3.6) : 0;
+        if (prev) {
+          const dt = (now - prev.ts) / 1000;
+          const dm = haversineM(prev, cur);
+          // GPS zıplamalarını ve duruştaki gürültüyü ele
+          if (dt > 0.5 && dt < 120 && dm > 3 && dm / dt < 60) {
+            const s = statsRef.current;
+            const segSpeed = (dm / dt) * 3.6;
+            const next: TripStats = {
+              totalMeters: s.totalMeters + dm,
+              movingSeconds: s.movingSeconds + dt,
+              maxSpeedKmh: Math.max(s.maxSpeedKmh, gpsSpeed || segSpeed),
+              startedAt: s.startedAt || now,
+              updatedAt: now,
+            };
+            statsRef.current = next;
+            setStats(next);
+            void saveStats(next);
+          }
+        }
+        lastFixRef.current = cur;
+
         const payload = {
           type: "position" as const,
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          speedKmh: pos.coords.speed ? Math.max(0, pos.coords.speed * 3.6) : 0,
+          speedKmh: gpsSpeed,
+          avgSpeedKmh: avgSpeedKmh(statsRef.current),
+          totalKm: statsRef.current.totalMeters / 1000,
           heading: pos.coords.heading,
           plate: SERVICE_INFO.plate,
           ts: Date.now(),
@@ -135,6 +182,8 @@ function DriverApp() {
     lat: number;
     lng: number;
     speedKmh: number;
+    avgSpeedKmh: number;
+    totalKm: number;
     heading: number | null;
     plate: string;
     ts: number;
@@ -153,6 +202,7 @@ function DriverApp() {
     setPeerReady(false);
     setRunning(false);
     setPosition(null);
+    lastFixRef.current = null;
   };
 
   useEffect(() => () => stopInternal(), []);
@@ -239,6 +289,48 @@ function DriverApp() {
                 <div className="text-3xl font-mono font-bold">
                   {position ? `±${Math.round(position.coords.accuracy)}m` : "—"}
                 </div>
+              </div>
+            </div>
+
+            <div className="panel p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div className="hud-label">Kalıcı Sürüş Sayacı (cihazda saklanır)</div>
+                <button
+                  onClick={async () => {
+                    const fresh = await resetStats();
+                    statsRef.current = fresh;
+                    setStats(fresh);
+                    lastFixRef.current = null;
+                  }}
+                  className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50"
+                >
+                  Sıfırla
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <div className="hud-label mb-1">Toplam KM</div>
+                  <div className="text-3xl font-mono font-bold text-primary">
+                    {(stats.totalMeters / 1000).toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div className="hud-label mb-1">Ortalama Hız</div>
+                  <div className="text-3xl font-mono font-bold">
+                    {Math.round(avgSpeedKmh(stats))}
+                    <span className="text-xs text-muted-foreground ml-1">km/s</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="hud-label mb-1">En Yüksek Hız</div>
+                  <div className="text-3xl font-mono font-bold">
+                    {Math.round(stats.maxSpeedKmh)}
+                    <span className="text-xs text-muted-foreground ml-1">km/s</span>
+                  </div>
+                </div>
+              </div>
+              <div className="text-xs text-muted-foreground mt-3 font-mono">
+                HAREKET SÜRESİ: {Math.floor(stats.movingSeconds / 60)} dk
               </div>
             </div>
 

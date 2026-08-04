@@ -5,7 +5,7 @@ import { ClientOnly } from "@/components/ClientOnly";
 import MapView from "@/components/MapView";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
-import { getEta, getRoute, formatEta } from "@/lib/routing";
+import { getRoute, getRouteEta, formatEta, type RouteEtaResult } from "@/lib/routing";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -34,6 +34,8 @@ interface DriverPayload {
   lat: number;
   lng: number;
   speedKmh: number;
+  avgSpeedKmh?: number;
+  totalKm?: number;
   heading: number | null;
   plate: string;
   ts: number;
@@ -121,7 +123,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "offline">("idle");
   const [driver, setDriver] = useState<DriverPayload | null>(null);
-  const [eta, setEta] = useState<{ durationS: number; distanceM: number } | null>(null);
+  const [eta, setEta] = useState<RouteEtaResult | null>(null);
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -200,16 +202,14 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       return;
     }
     let cancelled = false;
-    getEta(
-      { lat: driver.lat, lng: driver.lng },
-      { lat: selectedStop.lat, lng: selectedStop.lng },
-    ).then((r) => {
+    // Güzergâha sadık: aradaki tüm duraklardan geçerek + bekleme süreleriyle
+    getRouteEta({ lat: driver.lat, lng: driver.lng }, stops, selectedStop.id).then((r) => {
       if (!cancelled) setEta(r);
     });
     return () => {
       cancelled = true;
     };
-  }, [driver?.lat, driver?.lng, selectedStop?.id]);
+  }, [driver?.lat, driver?.lng, selectedStop?.id, stops]);
 
   const etaText = eta ? formatEta(eta.durationS) : null;
 
@@ -282,6 +282,11 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
                     MESAFE: {(eta.distanceM / 1000).toFixed(2)} KM
                   </p>
                 )}
+                {eta && eta.viaStops > 0 && (
+                  <p className="text-xs text-muted-foreground mt-1 font-mono">
+                    ÖNCE {eta.viaStops} DURAĞA UĞRAYACAK (+{Math.round(eta.dwellS / 60)} DK BEKLEME)
+                  </p>
+                )}
               </>
             )}
           </div>
@@ -304,6 +309,23 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
                   </div>
                 </div>
               </div>
+              {(driver.avgSpeedKmh !== undefined || driver.totalKm !== undefined) && (
+                <div className="grid grid-cols-2 gap-4 mt-4">
+                  <div>
+                    <div className="hud-label mb-1">Ortalama Hız</div>
+                    <div className="text-2xl font-mono font-bold">
+                      {Math.round(driver.avgSpeedKmh ?? 0)}
+                      <span className="text-xs text-muted-foreground ml-1">km/s</span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="hud-label mb-1">Toplam KM</div>
+                    <div className="text-2xl font-mono font-bold">
+                      {(driver.totalKm ?? 0).toFixed(1)}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="hud-label mt-4">Araç</div>
               <div className="text-sm text-foreground mt-1">
                 {SERVICE_INFO.vehicle} · {SERVICE_INFO.year}

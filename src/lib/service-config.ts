@@ -1,6 +1,7 @@
 // Servis aracı bilgileri - koda gömülü (yalnızca bu plakalı şoför "başlat" diyebilir)
 export const SERVICE_INFO = {
   plate: "06 FNJ 165",
+  driverName: "TANER BAYSAL",
   vehicle: "Volkswagen Crafter",
   year: 2016,
   operator: "Acrob Elektroland",

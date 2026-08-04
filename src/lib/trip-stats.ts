@@ -61,6 +61,123 @@ export async function resetStats(): Promise<TripStats> {
 }
 
 export function avgSpeedKmh(stats: TripStats): number {
-  if (stats.movingSeconds < 5) return 0;
-  return stats.totalMeters / 1000 / (stats.movingSeconds / 3600) || 0;
+  if (stats.movingSeconds < 15) return 0;
+  const v = stats.totalMeters / 1000 / (stats.movingSeconds / 3600);
+  if (!isFinite(v) || v < 0) return 0;
+  return Math.min(v, MAX_PLAUSIBLE_KMH);
 }
+
+// ============ GPS gürültü filtresi ============
+// Amaç: durakta beklerken km artmasın, GPS zıplaması "91 km/s" gibi sahte
+// zirveler üretmesin. Tüm eşikler servis aracı (şehir içi) için ayarlı.
+export const MAX_PLAUSIBLE_KMH = 110;
+const MAX_ACCURACY_M = 30; // bundan kötü fix tamamen atılır
+const MAX_ACCEL_KMH_PER_S = 8; // gerçek araç ivmesi sınırı
+const MIN_DT = 1; // saniye
+const MAX_DT = 30; // saniye (uzun boşluk = güvenilmez)
+const SPEED_SMOOTHING = 0.35; // EMA katsayısı
+
+export interface FixInput {
+  lat: number;
+  lng: number;
+  ts: number;
+  accuracy: number;
+  gpsSpeedKmh: number | null;
+}
+
+export interface FilterState {
+  lastFix: FixInput | null;
+  smoothedKmh: number;
+  fastStreak: number; // yüksek hız kaç kez üst üste doğrulandı
+}
+
+export const initialFilterState = (): FilterState => ({
+  lastFix: null,
+  smoothedKmh: 0,
+  fastStreak: 0,
+});
+
+export interface FixResult {
+  stats: TripStats;
+  speedKmh: number; // yumuşatılmış anlık hız
+  accepted: boolean;
+}
+
+function haversine(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const R = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const la1 = (a.lat * Math.PI) / 180;
+  const la2 = (b.lat * Math.PI) / 180;
+  const h =
+    Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): FixResult {
+  // 1) Doğruluğu kötü fixleri hiç kullanma
+  if (!isFinite(fix.accuracy) || fix.accuracy > MAX_ACCURACY_M) {
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+
+  const prev = state.lastFix;
+  if (!prev) {
+    state.lastFix = fix;
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+
+  const dt = (fix.ts - prev.ts) / 1000;
+  if (dt < MIN_DT || dt > MAX_DT) {
+    if (dt > MAX_DT) {
+      state.lastFix = fix;
+      state.smoothedKmh = 0;
+      state.fastStreak = 0;
+    }
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+
+  const dm = haversine(prev, fix);
+  // 2) Konum belirsizliğinden küçük hareketler = gürültü (durakta bekleme)
+  const noiseFloor = Math.max(8, (fix.accuracy + prev.accuracy) * 0.5);
+  if (dm < noiseFloor) {
+    state.lastFix = fix;
+    state.smoothedKmh = state.smoothedKmh * (1 - SPEED_SMOOTHING);
+    state.fastStreak = 0;
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+
+  const segKmh = (dm / dt) * 3.6;
+  // 3) İmkânsız hız veya imkânsız ivme = GPS zıplaması
+  if (segKmh > MAX_PLAUSIBLE_KMH) {
+    state.lastFix = fix;
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+  if (Math.abs(segKmh - state.smoothedKmh) / dt > MAX_ACCEL_KMH_PER_S && state.smoothedKmh > 0) {
+    state.lastFix = fix;
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+
+  // 4) GPS hızı varsa segment hızıyla çapraz doğrula, küçüğünü baz al
+  const gps = fix.gpsSpeedKmh != null && isFinite(fix.gpsSpeedKmh) ? Math.max(0, fix.gpsSpeedKmh) : null;
+  const measured = gps != null && gps <= MAX_PLAUSIBLE_KMH ? Math.min(gps, segKmh) : segKmh;
+
+  state.smoothedKmh = state.smoothedKmh
+    ? state.smoothedKmh + (measured - state.smoothedKmh) * SPEED_SMOOTHING
+    : measured;
+
+  // 5) Zirve hız sadece üst üste 3 doğrulanmış fix sonrası güncellenir
+  state.fastStreak = measured > stats.maxSpeedKmh ? state.fastStreak + 1 : 0;
+  const nextMax =
+    state.fastStreak >= 3 ? Math.min(measured, MAX_PLAUSIBLE_KMH) : stats.maxSpeedKmh;
+
+  const next: TripStats = {
+    totalMeters: stats.totalMeters + dm,
+    movingSeconds: stats.movingSeconds + dt,
+    maxSpeedKmh: Math.max(stats.maxSpeedKmh, nextMax),
+    startedAt: stats.startedAt || fix.ts,
+    updatedAt: fix.ts,
+  };
+  state.lastFix = fix;
+  return { stats: next, speedKmh: state.smoothedKmh, accepted: true };
+}
+

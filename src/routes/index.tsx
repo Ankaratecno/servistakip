@@ -1,11 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
 import { ClientOnly } from "@/components/ClientOnly";
-import MapView from "@/components/MapView";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
 import { getRoute, getRouteEta, formatEta, type RouteEtaResult } from "@/lib/routing";
+
+const MapView = lazy(() => import("@/components/MapView"));
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -38,6 +39,12 @@ interface DriverPayload {
   totalKm?: number;
   heading: number | null;
   plate: string;
+  ts: number;
+}
+
+interface DriverRoutePayload {
+  type: "route";
+  stops: Stop[];
   ts: number;
 }
 
@@ -119,7 +126,9 @@ function PassengerGate() {
 }
 
 function PassengerApp({ onBack }: { onBack: () => void }) {
-  const [stops, setStops] = useState<Stop[]>([]);
+  const [baseStops, setBaseStops] = useState<Stop[]>([]);
+  // Şoförün o sabah yayınladığı aktif güzergâh (atlanan duraklar çıkarılmış)
+  const [driverStops, setDriverStops] = useState<Stop[] | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "offline">("idle");
   const [driver, setDriver] = useState<DriverPayload | null>(null);
@@ -129,22 +138,36 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const connRef = useRef<DataConnection | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const stops = driverStops ?? baseStops;
+
   useEffect(() => {
-    const loaded = getStops();
-    setStops(loaded);
-    const firstStop = loaded.find((s) => s.kind === "stop");
-    if (firstStop) setSelectedStopId(firstStop.id);
+    setBaseStops(getStops());
   }, []);
 
-  // Güzergâh çizgisini bir kere çek
+  // Seçili durak aktif güzergâhta yoksa ilk gerçek durağa geç
+  useEffect(() => {
+    const realStops = stops.filter((s) => s.kind === "stop");
+    if (realStops.length === 0) return;
+    if (!selectedStopId || !realStops.some((s) => s.id === selectedStopId)) {
+      setSelectedStopId(realStops[0]!.id);
+    }
+  }, [stops, selectedStopId]);
+
+  // Güzergâh çizgisini çek (şoför güzergâhı değişince yeniden çizilir)
   useEffect(() => {
     if (stops.length < 2) return;
-    getRoute(stops).then((r) => r && setRoutePath(r.path));
+    let cancelled = false;
+    getRoute(stops).then((r) => {
+      if (!cancelled && r) setRoutePath(r.path);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [stops]);
 
   // PeerJS ile şoföre bağlan
   useEffect(() => {
-    if (stops.length === 0) return;
+    if (baseStops.length === 0) return;
     const peer = new Peer({ debug: 1 });
     peerRef.current = peer;
 
@@ -154,8 +177,12 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       connRef.current = conn;
       conn.on("open", () => setStatus("connected"));
       conn.on("data", (data) => {
-        const p = data as DriverPayload;
-        if (p?.type === "position") setDriver(p);
+        const p = data as DriverPayload | DriverRoutePayload;
+        if (p?.type === "position") setDriver(p as DriverPayload);
+        else if (p?.type === "route") {
+          const incoming = (p as DriverRoutePayload).stops;
+          if (Array.isArray(incoming) && incoming.length >= 2) setDriverStops(incoming);
+        }
       });
       conn.on("close", () => {
         setStatus("offline");
@@ -166,6 +193,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         scheduleReconnect();
       });
     };
+
 
     const scheduleReconnect = () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
@@ -188,7 +216,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       connRef.current?.close();
       peer.destroy();
     };
-  }, [stops.length]);
+  }, [baseStops.length]);
 
   // ETA hesabı - konum ve durak değişince
   const selectedStop = useMemo(
@@ -337,13 +365,15 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
         {/* Harita */}
         <div className="flex-1 panel overflow-hidden min-h-[400px] lg:min-h-[600px]">
-          <MapView
-            stops={stops}
-            selectedStopId={selectedStopId}
-            busPosition={driver ? { lat: driver.lat, lng: driver.lng } : null}
-            routePath={routePath}
-            className="h-full min-h-[400px] lg:min-h-[600px]"
-          />
+          <Suspense fallback={null}>
+            <MapView
+              stops={stops}
+              selectedStopId={selectedStopId}
+              busPosition={driver ? { lat: driver.lat, lng: driver.lng } : null}
+              routePath={routePath}
+              className="h-full min-h-[400px] lg:min-h-[600px]"
+            />
+          </Suspense>
         </div>
       </main>
 
@@ -388,7 +418,12 @@ function StatusBadge({ status }: { status: "idle" | "connecting" | "connected" |
   return (
     <div className={`panel px-4 py-3 flex items-center gap-3 ${map.color}`}>
       <div className={`w-2.5 h-2.5 rounded-full ${map.dot}`} />
-      <span className="text-sm font-semibold uppercase tracking-wider">{map.text}</span>
+      <div className="flex flex-col leading-tight">
+        <span className="text-sm font-semibold uppercase tracking-wider">{map.text}</span>
+        <span className="text-[11px] font-mono text-muted-foreground">
+          {SERVICE_INFO.plate} · {SERVICE_INFO.driverName}
+        </span>
+      </div>
     </div>
   );
 }

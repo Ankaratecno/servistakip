@@ -1,7 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { ClientOnly } from "@/components/ClientOnly";
-import MapView from "@/components/MapView";
 import { getRoute } from "@/lib/routing";
 import {
   addStop,
@@ -12,6 +11,8 @@ import {
   type Stop,
   type StopKind,
 } from "@/lib/stops";
+
+const MapView = lazy(() => import("@/components/MapView"));
 
 export const Route = createFileRoute("/admin")({
   head: () => ({
@@ -231,13 +232,15 @@ function AdminApp() {
         </div>
 
         <div className="flex-1 panel overflow-hidden min-h-[400px] lg:min-h-[600px]">
-          <MapView
-            stops={stops}
-            busPosition={pendingPoint}
-            routePath={routePath}
-            onMapClick={handleMapClick}
-            className="h-full min-h-[400px] lg:min-h-[600px]"
-          />
+          <Suspense fallback={null}>
+            <MapView
+              stops={stops}
+              busPosition={pendingPoint}
+              routePath={routePath}
+              onMapClick={handleMapClick}
+              className="h-full min-h-[400px] lg:min-h-[600px]"
+            />
+          </Suspense>
         </div>
       </main>
     </div>

@@ -1,19 +1,24 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
 import { ClientOnly } from "@/components/ClientOnly";
-import MapView from "@/components/MapView";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
+import { driverGateStatus, unlockDriver } from "@/lib/driver-gate.functions";
 import { getStops, type Stop } from "@/lib/stops";
-import { getRoute, haversineM } from "@/lib/routing";
+import { getRoute } from "@/lib/routing";
 import {
   avgSpeedKmh,
   loadStats,
   resetStats,
   saveStats,
   EMPTY_STATS,
+  ingestFix,
+  initialFilterState,
+  type FilterState,
   type TripStats,
 } from "@/lib/trip-stats";
+
+const MapView = lazy(() => import("@/components/MapView"));
 
 export const Route = createFileRoute("/driver")({
   head: () => ({
@@ -40,10 +45,83 @@ export const Route = createFileRoute("/driver")({
         </div>
       }
     >
-      <DriverApp />
+      <DriverGate />
     </ClientOnly>
   ),
 });
+
+function DriverGate() {
+  const [unlocked, setUnlocked] = useState<boolean | null>(null);
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    driverGateStatus()
+      .then((r) => setUnlocked(r.unlocked))
+      .catch(() => setUnlocked(false));
+  }, []);
+
+  if (unlocked === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-muted-foreground">
+        Kontrol ediliyor...
+      </div>
+    );
+  }
+
+  if (!unlocked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setErr(null);
+            try {
+              const res = await unlockDriver({ data: { password: pw } });
+              if (res.ok) setUnlocked(true);
+              else setErr("Şifre hatalı.");
+            } catch {
+              setErr("Doğrulama yapılamadı, tekrar deneyin.");
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="panel p-8 w-full max-w-sm"
+        >
+          <div className="hud-label mb-2">Şoför Girişi</div>
+          <h1 className="text-lg font-bold mb-6">{SERVICE_INFO.driverName}</h1>
+          <label className="hud-label block mb-2" htmlFor="driver-pw">
+            Şifre
+          </label>
+          <input
+            id="driver-pw"
+            name="password"
+            type="password"
+            autoComplete="current-password"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            className="w-full bg-input border border-border rounded-md px-4 py-3 font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          {err && <div className="mt-3 text-sm text-red-400">{err}</div>}
+          <button
+            type="submit"
+            disabled={busy}
+            className="mt-6 w-full bg-primary text-primary-foreground font-bold py-3 rounded-md hover:bg-primary/90 transition disabled:opacity-60"
+          >
+            {busy ? "Kontrol ediliyor..." : "GİRİŞ"}
+          </button>
+          <Link to="/" className="hud-label block mt-4 text-center hover:text-primary">
+            ← Ana Sayfa
+          </Link>
+        </form>
+      </div>
+    );
+  }
+
+  return <DriverApp />;
+}
 
 function DriverApp() {
   const [plate] = useState(SERVICE_INFO.plate);
@@ -52,18 +130,56 @@ function DriverApp() {
   const [position, setPosition] = useState<GeolocationPosition | null>(null);
   const [peerReady, setPeerReady] = useState(false);
   const [connCount, setConnCount] = useState(0);
-  const [stops] = useState<Stop[]>(() => getStops());
+  const [allStops] = useState<Stop[]>(() => getStops());
+  const [startStopId, setStartStopId] = useState<string>("");
+  const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
   const [stats, setStats] = useState<TripStats>(EMPTY_STATS);
+  const [liveSpeed, setLiveSpeed] = useState(0);
   const statsRef = useRef<TripStats>(EMPTY_STATS);
-  const lastFixRef = useRef<{ lat: number; lng: number; ts: number } | null>(null);
+  const filterRef = useRef<FilterState>(initialFilterState());
+  const lastSaveRef = useRef<number>(0);
 
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<Set<DataConnection>>(new Set());
   const watchIdRef = useRef<number | null>(null);
 
+  // Rota noktaları dahil tüm liste (şoför her noktayı başlangıç seçebilir / atlayabilir)
+  const realStops = allStops;
+
+  // İlk açılışta başlangıç = listedeki ilk nokta
+  useEffect(() => {
+    if (!startStopId && allStops.length > 0) setStartStopId(allStops[0]!.id);
+  }, [allStops, startStopId]);
+
+  // Şoförün bugün için seçtiği aktif güzergâh (atlanan durak/rota noktaları çıkarılmış)
+  const stops = useMemo<Stop[]>(() => {
+    const startIdx = allStops.findIndex((s) => s.id === startStopId);
+    const from = startIdx >= 0 ? allStops.slice(startIdx) : allStops;
+    const kept = from.filter((s) => !skipped.has(s.id));
+    return kept.map((s, i) => ({ ...s, order: i + 1 }));
+  }, [allStops, startStopId, skipped]);
+
+
+  const stopsRef = useRef<Stop[]>(stops);
+  stopsRef.current = stops;
+
+  const routePayload = () => ({ type: "route" as const, stops: stopsRef.current, ts: Date.now() });
+
+  const broadcastRoute = () => {
+    const payload = routePayload();
+    connectionsRef.current.forEach((c) => {
+      try {
+        if (c.open) c.send(payload);
+      } catch {
+        /* ignore */
+      }
+    });
+  };
+
   useEffect(() => {
     if (stops.length >= 2) getRoute(stops).then((r) => r && setRoutePath(r.path));
+    if (running) broadcastRoute();
   }, [stops]);
 
   // Kalıcı istatistikleri IndexedDB'den yükle
@@ -99,7 +215,12 @@ function DriverApp() {
       connectionsRef.current.add(conn);
       setConnCount(connectionsRef.current.size);
       conn.on("open", () => {
-        // Son bilinen konumu hemen gönder
+        // Aktif güzergâhı ve son bilinen konumu hemen gönder
+        try {
+          conn.send(routePayload());
+        } catch {
+          /* ignore */
+        }
         const p = watchLastRef.current;
         if (p) conn.send(p);
       });
@@ -126,37 +247,32 @@ function DriverApp() {
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         setPosition(pos);
-        // --- Kalıcı sürüş istatistikleri (IndexedDB) ---
+        // --- Filtrelenmiş, kalıcı sürüş istatistikleri (IndexedDB) ---
         const now = pos.timestamp || Date.now();
-        const cur = { lat: pos.coords.latitude, lng: pos.coords.longitude, ts: now };
-        const prev = lastFixRef.current;
-        const gpsSpeed = pos.coords.speed ? Math.max(0, pos.coords.speed * 3.6) : 0;
-        if (prev) {
-          const dt = (now - prev.ts) / 1000;
-          const dm = haversineM(prev, cur);
-          // GPS zıplamalarını ve duruştaki gürültüyü ele
-          if (dt > 0.5 && dt < 120 && dm > 3 && dm / dt < 60) {
-            const s = statsRef.current;
-            const segSpeed = (dm / dt) * 3.6;
-            const next: TripStats = {
-              totalMeters: s.totalMeters + dm,
-              movingSeconds: s.movingSeconds + dt,
-              maxSpeedKmh: Math.max(s.maxSpeedKmh, gpsSpeed || segSpeed),
-              startedAt: s.startedAt || now,
-              updatedAt: now,
-            };
-            statsRef.current = next;
-            setStats(next);
-            void saveStats(next);
+        const gpsSpeed = pos.coords.speed != null ? Math.max(0, pos.coords.speed * 3.6) : null;
+        const res = ingestFix(statsRef.current, filterRef.current, {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          ts: now,
+          accuracy: pos.coords.accuracy,
+          gpsSpeedKmh: gpsSpeed,
+        });
+        setLiveSpeed(res.speedKmh);
+        if (res.accepted) {
+          statsRef.current = res.stats;
+          setStats(res.stats);
+          // Yazmayı seyrekleştir (IndexedDB'yi yormamak için ~5 sn)
+          if (now - lastSaveRef.current > 5000) {
+            lastSaveRef.current = now;
+            void saveStats(res.stats);
           }
         }
-        lastFixRef.current = cur;
 
         const payload = {
           type: "position" as const,
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          speedKmh: gpsSpeed,
+          speedKmh: res.speedKmh,
           avgSpeedKmh: avgSpeedKmh(statsRef.current),
           totalKm: statsRef.current.totalMeters / 1000,
           heading: pos.coords.heading,
@@ -202,12 +318,13 @@ function DriverApp() {
     setPeerReady(false);
     setRunning(false);
     setPosition(null);
-    lastFixRef.current = null;
+    filterRef.current = initialFilterState();
+    setLiveSpeed(0);
   };
 
   useEffect(() => () => stopInternal(), []);
 
-  const speedKmh = position?.coords.speed ? Math.max(0, position.coords.speed * 3.6) : 0;
+  const speedKmh = liveSpeed;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -225,7 +342,7 @@ function DriverApp() {
 
       <main className="flex-1 max-w-5xl w-full mx-auto p-4 flex flex-col gap-4">
         {!running ? (
-          <div className="panel p-8 max-w-md mx-auto w-full">
+          <div className="panel p-8 max-w-xl mx-auto w-full">
             <div className="hud-label mb-2">Servis Bilgisi</div>
             <div className="text-lg font-bold mb-1">
               {SERVICE_INFO.vehicle} {SERVICE_INFO.year}
@@ -240,6 +357,17 @@ function DriverApp() {
               aria-readonly="true"
               className="w-full bg-input border border-border rounded-md px-4 py-4 text-xl font-mono font-bold uppercase text-primary cursor-not-allowed focus:outline-none"
             />
+
+            <div className="mt-6">
+              <StopPlanner
+                realStops={realStops}
+                startStopId={startStopId}
+                setStartStopId={setStartStopId}
+                skipped={skipped}
+                setSkipped={setSkipped}
+              />
+            </div>
+
             {error && (
               <div className="mt-3 text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-md p-3">
                 {error}
@@ -276,6 +404,21 @@ function DriverApp() {
               </button>
             </div>
 
+            <div className="panel p-5">
+              <StopPlanner
+                realStops={realStops}
+                startStopId={startStopId}
+                setStartStopId={setStartStopId}
+                skipped={skipped}
+                setSkipped={setSkipped}
+              />
+              <p className="text-xs text-muted-foreground mt-3">
+                Buradaki değişiklikler anında tüm yolculara gönderilir; süre ve harita güncellenir.
+              </p>
+            </div>
+
+
+
             <div className="grid grid-cols-2 gap-4">
               <div className="panel p-5">
                 <div className="hud-label mb-2">Hız</div>
@@ -300,7 +443,8 @@ function DriverApp() {
                     const fresh = await resetStats();
                     statsRef.current = fresh;
                     setStats(fresh);
-                    lastFixRef.current = null;
+                    filterRef.current = initialFilterState();
+                    setLiveSpeed(0);
                   }}
                   className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50"
                 >
@@ -335,16 +479,18 @@ function DriverApp() {
             </div>
 
             <div className="panel overflow-hidden flex-1 min-h-[400px]">
-              <MapView
-                stops={stops}
-                busPosition={
-                  position
-                    ? { lat: position.coords.latitude, lng: position.coords.longitude }
-                    : null
-                }
-                routePath={routePath}
-                className="h-full min-h-[400px]"
-              />
+              <Suspense fallback={null}>
+                <MapView
+                  stops={stops}
+                  busPosition={
+                    position
+                      ? { lat: position.coords.latitude, lng: position.coords.longitude }
+                      : null
+                  }
+                  routePath={routePath}
+                  className="h-full min-h-[400px]"
+                />
+              </Suspense>
             </div>
 
             {!peerReady && (
@@ -355,6 +501,88 @@ function DriverApp() {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+function StopPlanner({
+  realStops,
+  startStopId,
+  setStartStopId,
+  skipped,
+  setSkipped,
+}: {
+  realStops: Stop[];
+  startStopId: string;
+  setStartStopId: (id: string) => void;
+  skipped: Set<string>;
+  setSkipped: (s: Set<string>) => void;
+}) {
+  const startIdx = realStops.findIndex((s) => s.id === startStopId);
+  const toggle = (id: string) => {
+    const next = new Set(skipped);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSkipped(next);
+  };
+  return (
+    <div>
+      <label className="hud-label block mb-2">Bugün Hangi Noktadan Başlıyorsun?</label>
+      <select
+        value={startStopId}
+        onChange={(e) => {
+          setStartStopId(e.target.value);
+          const idx = realStops.findIndex((s) => s.id === e.target.value);
+          // Başlangıçtan önceki noktalar zaten güzergâhtan düşer, atlama işaretlerini temizle
+          const next = new Set(skipped);
+          realStops.slice(0, Math.max(idx, 0)).forEach((s) => next.delete(s.id));
+          setSkipped(next);
+        }}
+        className="w-full bg-input border border-border rounded-md px-3 py-3 font-semibold focus:outline-none focus:ring-2 focus:ring-primary"
+      >
+        {realStops.map((s, i) => (
+          <option key={s.id} value={s.id}>
+            {i + 1}. {s.kind === "stop" ? "" : "• "}
+            {s.name} ({s.lat.toFixed(4)}, {s.lng.toFixed(4)})
+          </option>
+        ))}
+      </select>
+
+      <div className="hud-label mt-5 mb-2">Uğramayacağın Durak / Rota Noktalarını İşaretle</div>
+
+      <div className="flex flex-col gap-1 max-h-64 overflow-y-auto pr-1">
+        {realStops.map((s, i) => {
+          const before = startIdx >= 0 && i < startIdx;
+          const isLast = i === realStops.length - 1;
+          const off = before || skipped.has(s.id);
+          return (
+            <label
+              key={s.id}
+              className={`flex items-center gap-3 px-3 py-2 rounded-md border ${
+                off ? "border-border/50 opacity-50" : "border-border"
+              } ${before || isLast ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/40"}`}
+            >
+              <input
+                type="checkbox"
+                checked={!off}
+                disabled={before || isLast}
+                onChange={() => toggle(s.id)}
+                className="w-4 h-4 accent-primary"
+              />
+              <span className="text-sm font-semibold flex-1">
+                {i + 1}. {s.name}
+                <span className="ml-2 text-[10px] font-mono text-muted-foreground">
+                  {s.kind === "stop" ? "DURAK" : "ROTA"} · {s.lat.toFixed(4)}, {s.lng.toFixed(4)}
+                </span>
+              </span>
+
+              <span className="text-[11px] font-mono text-muted-foreground">
+                {before ? "BAŞLANGIÇ ÖNCESİ" : off ? "ATLANDI" : "UĞRANACAK"}
+              </span>
+            </label>
+          );
+        })}
+      </div>
     </div>
   );
 }

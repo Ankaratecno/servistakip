@@ -5,6 +5,7 @@ import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
 import { getRoute, getRouteEta, formatEta, type RouteEtaResult } from "@/lib/routing";
+import { blobToBase64, pickRecorderMime, type VoiceAlertPayload } from "@/lib/voice-alert";
 
 const MapView = lazy(() => import("@/components/MapView"));
 
@@ -194,7 +195,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       });
     };
 
-
     const scheduleReconnect = () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = setTimeout(() => {
@@ -256,6 +256,21 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             <span>Plaka Ekranına Dön</span>
           </button>
           <StatusBadge status={status} />
+
+          <DriverAlertPanel
+            connected={status === "connected"}
+            stop={selectedStop}
+            send={(p) => {
+              const c = connRef.current;
+              if (!c || !c.open) return false;
+              try {
+                c.send(p);
+                return true;
+              } catch {
+                return false;
+              }
+            }}
+          />
 
           <div className="panel p-5">
             <div className="hud-label mb-3">Durağınız</div>
@@ -386,6 +401,111 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           Durak Yönetimi
         </Link>
       </footer>
+    </div>
+  );
+}
+
+function DriverAlertPanel({
+  connected,
+  stop,
+  send,
+}: {
+  connected: boolean;
+  stop: Stop | null;
+  send: (p: VoiceAlertPayload) => boolean;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [info, setInfo] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const recRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  const sendAbsent = () => {
+    const ok = send({
+      type: "alert",
+      kind: "absent",
+      text: `${stop?.name ?? "Durak"} durağındaki yolcu bugün gelmiyor.`,
+      stopId: stop?.id ?? null,
+      stopName: stop?.name ?? null,
+      ts: Date.now(),
+    });
+    setErr(ok ? null : "Şoföre ulaşılamadı, servis çevrimdışı.");
+    setInfo(ok ? "Şoföre 'ben yokum' uyarısı gönderildi." : null);
+  };
+
+  const startRec = async () => {
+    setErr(null);
+    setInfo(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = pickRecorderMime();
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunksRef.current, { type: mime || "audio/webm" });
+        const audio = await blobToBase64(blob);
+        const ok = send({
+          type: "alert",
+          kind: "voice",
+          audio,
+          mime: mime || "audio/webm",
+          text: `${stop?.name ?? "Durak"} durağından sesli mesaj`,
+          stopId: stop?.id ?? null,
+          stopName: stop?.name ?? null,
+          ts: Date.now(),
+        });
+        setErr(ok ? null : "Şoföre ulaşılamadı, servis çevrimdışı.");
+        setInfo(ok ? "Sesli uyarı şoföre gönderildi." : null);
+      };
+      rec.start();
+      recRef.current = rec;
+      setRecording(true);
+    } catch {
+      setErr("Mikrofon izni verilmedi.");
+    }
+  };
+
+  const stopRec = () => {
+    recRef.current?.stop();
+    recRef.current = null;
+    setRecording(false);
+  };
+
+  return (
+    <div className="panel p-5">
+      <div className="hud-label mb-2">Şoföre Uyarı</div>
+      <p className="text-xs text-muted-foreground mb-3">
+        Mikrofona konuşarak şoföre erken uyarı gönder. Örn: "Ben bugün yokum, durağa uğrama."
+      </p>
+      <button
+        onClick={recording ? stopRec : startRec}
+        disabled={!connected}
+        className={`w-full py-3 rounded-md font-bold tracking-wide transition disabled:opacity-40 disabled:cursor-not-allowed ${
+          recording
+            ? "bg-destructive text-destructive-foreground animate-pulse"
+            : "bg-primary text-primary-foreground hover:bg-primary/90"
+        }`}
+      >
+        {recording ? "⏹ KAYDI BİTİR VE GÖNDER" : "🎙 SESLİ UYARI GÖNDER"}
+      </button>
+      <button
+        onClick={sendAbsent}
+        disabled={!connected}
+        className="mt-2 w-full py-2.5 rounded-md border border-border text-sm font-semibold hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        🙅 Bugün Yokum (hızlı uyarı)
+      </button>
+      {!connected && (
+        <div className="mt-3 text-xs text-muted-foreground">
+          Servis çevrimdışı; şoför yayına başlayınca gönderebilirsiniz.
+        </div>
+      )}
+      {info && <div className="mt-3 text-xs text-primary">{info}</div>}
+      {err && <div className="mt-3 text-xs text-red-400">{err}</div>}
     </div>
   );
 }

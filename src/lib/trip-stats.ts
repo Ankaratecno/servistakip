@@ -109,8 +109,7 @@ function haversine(a: { lat: number; lng: number }, b: { lat: number; lng: numbe
   const dLng = ((b.lng - a.lng) * Math.PI) / 180;
   const la1 = (a.lat * Math.PI) / 180;
   const la2 = (b.lat * Math.PI) / 180;
-  const h =
-    Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
@@ -158,7 +157,8 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   }
 
   // 4) GPS hızı varsa segment hızıyla çapraz doğrula, küçüğünü baz al
-  const gps = fix.gpsSpeedKmh != null && isFinite(fix.gpsSpeedKmh) ? Math.max(0, fix.gpsSpeedKmh) : null;
+  const gps =
+    fix.gpsSpeedKmh != null && isFinite(fix.gpsSpeedKmh) ? Math.max(0, fix.gpsSpeedKmh) : null;
   const measured = gps != null && gps <= MAX_PLAUSIBLE_KMH ? Math.min(gps, segKmh) : segKmh;
 
   state.smoothedKmh = state.smoothedKmh
@@ -167,8 +167,7 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
 
   // 5) Zirve hız sadece üst üste 3 doğrulanmış fix sonrası güncellenir
   state.fastStreak = measured > stats.maxSpeedKmh ? state.fastStreak + 1 : 0;
-  const nextMax =
-    state.fastStreak >= 3 ? Math.min(measured, MAX_PLAUSIBLE_KMH) : stats.maxSpeedKmh;
+  const nextMax = state.fastStreak >= 3 ? Math.min(measured, MAX_PLAUSIBLE_KMH) : stats.maxSpeedKmh;
 
   const next: TripStats = {
     totalMeters: stats.totalMeters + dm,
@@ -180,4 +179,3 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   state.lastFix = fix;
   return { stats: next, speedKmh: state.smoothedKmh, accepted: true };
 }
-

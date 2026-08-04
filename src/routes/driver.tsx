@@ -3,9 +3,11 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
 import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
-import { driverGateStatus, unlockDriver } from "@/lib/driver-gate.functions";
+import { DRIVER_SESSION_KEY, checkDriverPassword } from "@/lib/driver-auth";
 import { getStops, type Stop } from "@/lib/stops";
 import { getRoute } from "@/lib/routing";
+import { beep, playBase64Audio, speak, type VoiceAlertPayload } from "@/lib/voice-alert";
+
 import {
   avgSpeedKmh,
   loadStats,
@@ -51,76 +53,58 @@ export const Route = createFileRoute("/driver")({
 });
 
 function DriverGate() {
-  const [unlocked, setUnlocked] = useState<boolean | null>(null);
+  const [unlocked, setUnlocked] = useState(
+    () => sessionStorage.getItem(DRIVER_SESSION_KEY) === "1",
+  );
   const [pw, setPw] = useState("");
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    driverGateStatus()
-      .then((r) => setUnlocked(r.unlocked))
-      .catch(() => setUnlocked(false));
-  }, []);
+  if (unlocked) return <DriverApp />;
 
-  if (unlocked === null) {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-muted-foreground">
-        Kontrol ediliyor...
-      </div>
-    );
-  }
-
-  if (!unlocked) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-4">
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setBusy(true);
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (checkDriverPassword(pw)) {
+            sessionStorage.setItem(DRIVER_SESSION_KEY, "1");
+            setUnlocked(true);
+          } else {
+            setErr("Şifre hatalı.");
+          }
+        }}
+        className="panel p-8 w-full max-w-sm"
+      >
+        <div className="hud-label mb-2">Şoför Girişi</div>
+        <h1 className="text-lg font-bold mb-6">{SERVICE_INFO.driverName}</h1>
+        <label className="hud-label block mb-2" htmlFor="driver-pw">
+          Şifre
+        </label>
+        <input
+          id="driver-pw"
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          value={pw}
+          onChange={(e) => {
+            setPw(e.target.value);
             setErr(null);
-            try {
-              const res = await unlockDriver({ data: { password: pw } });
-              if (res.ok) setUnlocked(true);
-              else setErr("Şifre hatalı.");
-            } catch {
-              setErr("Doğrulama yapılamadı, tekrar deneyin.");
-            } finally {
-              setBusy(false);
-            }
           }}
-          className="panel p-8 w-full max-w-sm"
+          className="w-full bg-input border border-border rounded-md px-4 py-3 font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+        />
+        {err && <div className="mt-3 text-sm text-red-400">{err}</div>}
+        <button
+          type="submit"
+          className="mt-6 w-full bg-primary text-primary-foreground font-bold py-3 rounded-md hover:bg-primary/90 transition"
         >
-          <div className="hud-label mb-2">Şoför Girişi</div>
-          <h1 className="text-lg font-bold mb-6">{SERVICE_INFO.driverName}</h1>
-          <label className="hud-label block mb-2" htmlFor="driver-pw">
-            Şifre
-          </label>
-          <input
-            id="driver-pw"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            value={pw}
-            onChange={(e) => setPw(e.target.value)}
-            className="w-full bg-input border border-border rounded-md px-4 py-3 font-mono focus:outline-none focus:ring-2 focus:ring-primary"
-          />
-          {err && <div className="mt-3 text-sm text-red-400">{err}</div>}
-          <button
-            type="submit"
-            disabled={busy}
-            className="mt-6 w-full bg-primary text-primary-foreground font-bold py-3 rounded-md hover:bg-primary/90 transition disabled:opacity-60"
-          >
-            {busy ? "Kontrol ediliyor..." : "GİRİŞ"}
-          </button>
-          <Link to="/" className="hud-label block mt-4 text-center hover:text-primary">
-            ← Ana Sayfa
-          </Link>
-        </form>
-      </div>
-    );
-  }
-
-  return <DriverApp />;
+          GİRİŞ
+        </button>
+        <Link to="/" className="hud-label block mt-4 text-center hover:text-primary">
+          ← Ana Sayfa
+        </Link>
+      </form>
+    </div>
+  );
 }
 
 function DriverApp() {
@@ -136,6 +120,8 @@ function DriverApp() {
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
   const [stats, setStats] = useState<TripStats>(EMPTY_STATS);
   const [liveSpeed, setLiveSpeed] = useState(0);
+  const [alerts, setAlerts] = useState<VoiceAlertPayload[]>([]);
+
   const statsRef = useRef<TripStats>(EMPTY_STATS);
   const filterRef = useRef<FilterState>(initialFilterState());
   const lastSaveRef = useRef<number>(0);
@@ -159,7 +145,6 @@ function DriverApp() {
     const kept = from.filter((s) => !skipped.has(s.id));
     return kept.map((s, i) => ({ ...s, order: i + 1 }));
   }, [allStops, startStopId, skipped]);
-
 
   const stopsRef = useRef<Stop[]>(stops);
   stopsRef.current = stops;
@@ -224,6 +209,20 @@ function DriverApp() {
         const p = watchLastRef.current;
         if (p) conn.send(p);
       });
+      conn.on("data", (data) => {
+        const p = data as VoiceAlertPayload;
+        if (p?.type !== "alert") return;
+        setAlerts((prev) => [p, ...prev].slice(0, 20));
+        beep();
+        window.setTimeout(() => {
+          if (p.kind === "voice" && p.audio) {
+            void playBase64Audio(p.audio, p.mime ?? "audio/webm");
+          } else {
+            speak(p.text ?? `${p.stopName ?? "Bir"} durağındaki yolcu bugün gelmiyor.`);
+          }
+        }, 350);
+      });
+
       conn.on("close", () => {
         connectionsRef.current.delete(conn);
         setConnCount(connectionsRef.current.size);
@@ -417,8 +416,6 @@ function DriverApp() {
               </p>
             </div>
 
-
-
             <div className="grid grid-cols-2 gap-4">
               <div className="panel p-5">
                 <div className="hud-label mb-2">Hız</div>
@@ -476,6 +473,64 @@ function DriverApp() {
               <div className="text-xs text-muted-foreground mt-3 font-mono">
                 HAREKET SÜRESİ: {Math.floor(stats.movingSeconds / 60)} dk
               </div>
+            </div>
+
+            <div className="panel p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div className="hud-label">Yolcu Uyarıları (sesli)</div>
+                {alerts.length > 0 && (
+                  <button
+                    onClick={() => setAlerts([])}
+                    className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50"
+                  >
+                    Temizle
+                  </button>
+                )}
+              </div>
+              {alerts.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  Henüz uyarı yok. Yolcular mikrofonla "ben yokum" dediğinde burada sesli olarak
+                  duyacaksın.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
+                  {alerts.map((a) => (
+                    <div
+                      key={a.ts}
+                      className="flex items-center gap-3 px-3 py-2 rounded-md border border-border"
+                    >
+                      <span className="text-lg">{a.kind === "voice" ? "🎙" : "🙅"}</span>
+                      <div className="flex-1 text-sm">
+                        <div className="font-semibold">{a.stopName ?? "Bilinmeyen durak"}</div>
+                        <div className="text-[11px] font-mono text-muted-foreground">
+                          {new Date(a.ts).toLocaleTimeString("tr-TR")} ·{" "}
+                          {a.kind === "voice" ? "SESLİ MESAJ" : "GELMİYOR"}
+                        </div>
+                      </div>
+                      {a.kind === "voice" && a.audio && (
+                        <button
+                          onClick={() => void playBase64Audio(a.audio!, a.mime ?? "audio/webm")}
+                          className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50"
+                        >
+                          ▶ Dinle
+                        </button>
+                      )}
+                      {a.stopId && !skipped.has(a.stopId) && (
+                        <button
+                          onClick={() => {
+                            const next = new Set(skipped);
+                            next.add(a.stopId!);
+                            setSkipped(next);
+                          }}
+                          className="text-xs px-3 py-1.5 rounded-md bg-destructive text-destructive-foreground"
+                        >
+                          Durağı Atla
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="panel overflow-hidden flex-1 min-h-[400px]">

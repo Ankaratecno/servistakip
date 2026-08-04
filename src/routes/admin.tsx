@@ -112,10 +112,6 @@ function AdminApp() {
         <div className="lg:w-[420px] flex flex-col gap-4">
           <form onSubmit={handleAdd} className="panel p-5 space-y-3">
             <div className="hud-label">Yeni Durak Ekle</div>
-            <div className="text-xs text-primary bg-primary/10 border border-primary/30 rounded-md p-2">
-              💡 İpucu: Haritada istediğin noktaya <strong>tıkla</strong>, koordinat otomatik dolar.
-              Sonra durak adını yaz ve ekle.
-            </div>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"

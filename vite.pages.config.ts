@@ -12,7 +12,15 @@ export default defineConfig({
   publicDir: path.resolve(process.cwd(), "public"),
   plugins: [react(), tailwindcss(), tsConfigPaths({ projects: ["./tsconfig.json"] })],
   resolve: {
-    alias: { "@": path.resolve(process.cwd(), "src") },
+    alias: [
+      // SPA build: __root.tsx uses TanStack Start's shellComponent/<Scripts/>,
+      // which has no meaning (and hangs) in a plain client-side render.
+      {
+        find: /.*\/routes\/__root(\.tsx)?$/,
+        replacement: path.resolve(process.cwd(), "pages/root-spa.tsx"),
+      },
+      { find: "@", replacement: path.resolve(process.cwd(), "src") },
+    ],
   },
   build: {
     outDir: path.resolve(process.cwd(), "dist-pages"),

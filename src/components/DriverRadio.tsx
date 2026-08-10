@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
-import { hourAnnouncementText, loadVoiceBuffer, playJingle, randomJingleLine } from "@/lib/jingle";
-import { synthAnnouncement } from "@/lib/tts.functions";
+import { loadBuffer, playJingle } from "@/lib/jingle";
+import { hourAnnouncementUrl, randomJingleUrl } from "@/lib/voice-assets";
 
 interface Track {
   name: string;
@@ -135,7 +135,7 @@ export default function DriverRadio({
     if (el) el.volume = on ? 0.12 : 1;
   };
 
-  const runJingle = async (text: string, soft: boolean, label: string) => {
+  const runJingle = async (url: string, soft: boolean, label: string) => {
     if (busyRef.current) return;
     ensureGraph();
     const ctx = ctxRef.current!;
@@ -153,14 +153,13 @@ export default function DriverRadio({
       ts: Date.now(),
     });
     try {
-      const buf = await loadVoiceBuffer(ctx, text, async () => {
-        const { mp3 } = await synthAnnouncement({ data: { text } });
-        return mp3;
-      });
+      const buf = await loadBuffer(ctx, url);
       await playJingle(ctx, out, { voice: buf, soft });
       setErr(null);
     } catch {
-      setErr("Jingle sesi üretilemedi.");
+      // Ses indirilemediyse (internet yok) en azından müzikal jingle çalsın.
+      await playJingle(ctx, out, { voice: null, soft, bedDuration: 3.2 });
+      setErr("Anons sesi indirilemedi; sadece jingle çalındı.");
     }
     duck(false);
     setOnAir(null);
@@ -173,35 +172,17 @@ export default function DriverRadio({
     playedCountRef.current += 1;
     const every = Math.max(1, jingleEveryRef.current);
     if (jingleOnRef.current && playedCountRef.current % every === 0) {
-      await runJingle(randomJingleLine(), false, "🎙 ELEKTRO RADYO");
+      await runJingle(randomJingleUrl(), false, "🎙 ELEKTRO RADYO");
     }
     next();
   };
   const afterTrackRef = useRef(afterTrack);
   afterTrackRef.current = afterTrack;
 
-  const playStationId = () => void runJingle(randomJingleLine(), false, "🎙 ELEKTRO RADYO");
+  const playStationId = () => void runJingle(randomJingleUrl(), false, "🎙 ELEKTRO RADYO");
 
   const playHourAnnouncement = async () => {
-    ensureGraph();
-    const ctx = ctxRef.current!;
-    try {
-      const { mp3 } = await synthAnnouncement({ data: { text: hourAnnouncementText() } });
-      const bytes = Uint8Array.from(atob(mp3), (c) => c.charCodeAt(0));
-      const buf = await ctx.decodeAudioData(bytes.buffer);
-      if (busyRef.current) return;
-      busyRef.current = true;
-      setOnAir("🕐 SAAT ANONSU");
-      duck(true);
-      callEveryone();
-      await playJingle(ctx, gainRef.current!, { voice: buf, soft: true });
-      duck(false);
-      setOnAir(null);
-      busyRef.current = false;
-      sendState(!audioRef.current?.paused, indexRef.current);
-    } catch {
-      setErr("Saat anonsu üretilemedi.");
-    }
+    await runJingle(hourAnnouncementUrl(), true, "🕐 SAAT ANONSU");
   };
 
   // Saat başı anonsu (yayın açıkken)
@@ -233,6 +214,17 @@ export default function DriverRadio({
     }
   };
 
+  // Durumu düzenli yayınla: sonradan bağlanan yolcu da doğru parçayı görsün
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const el = audioRef.current;
+      if (!el || !el.src) return;
+      if (busyRef.current) return;
+      sendState(!el.paused, indexRef.current);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, []);
+
   useEffect(() => {
     if (gainRef.current) gainRef.current.gain.value = volume;
   }, [volume]);
@@ -252,15 +244,31 @@ export default function DriverRadio({
   );
 
   const onFiles = (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const added = Array.from(files)
-      .filter((f) => f.type.startsWith("audio/") || /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name))
-      .map((f) => ({ name: f.name.replace(/\.[^.]+$/, ""), url: URL.createObjectURL(f) }));
-    if (added.length === 0) {
-      setErr("Seçilen dosyalar arasında müzik bulunamadı.");
+    if (!files || files.length === 0) {
+      setErr("Dosya seçilmedi. Telefonda 'Dosyalar' veya 'Ses' uygulamasından seçmeyi deneyin.");
       return;
     }
-    setErr(null);
+    // Mobilde f.type çoğu zaman boş gelir; sadece açıkça ses olmayanları eleriz.
+    const list = Array.from(files);
+    const rejected = list.filter(
+      (f) =>
+        (f.type &&
+          !f.type.startsWith("audio/") &&
+          !f.type.startsWith("application/octet-stream")) ||
+        /\.(jpg|jpeg|png|gif|heic|webp|mp4|mov|pdf|txt|doc|docx|zip)$/i.test(f.name),
+    );
+    const accepted = list.filter((f) => !rejected.includes(f));
+    const added = accepted.map((f) => ({
+      name: f.name.replace(/\.[^.]+$/, "") || "Parça",
+      url: URL.createObjectURL(f),
+    }));
+    if (added.length === 0) {
+      setErr(
+        `Müzik bulunamadı (${list.length} dosya elendi). Telefonda MP3'leri "Dosyalar" uygulamasından seçin.`,
+      );
+      return;
+    }
+    setErr(rejected.length > 0 ? `${rejected.length} dosya ses olmadığı için atlandı.` : null);
     setTracks((prev) => [...prev, ...added]);
   };
 
@@ -279,9 +287,12 @@ export default function DriverRadio({
         <span className="sr-only">Müzik dosyaları seç</span>
         <input
           type="file"
-          accept="audio/*"
+          accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus,.wma"
           multiple
-          onChange={(e) => onFiles(e.target.files)}
+          onChange={(e) => {
+            onFiles(e.target.files);
+            e.target.value = "";
+          }}
           className="w-full text-sm file:mr-3 file:px-4 file:py-2 file:rounded-md file:border-0 file:bg-primary file:text-primary-foreground file:font-semibold text-muted-foreground"
         />
       </label>

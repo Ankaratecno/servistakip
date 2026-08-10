@@ -272,7 +272,9 @@ function DriverApp() {
     });
   };
 
+  const lastRadioRef = useRef<RadioStatePayload | null>(null);
   const broadcastRadio = (payload: RadioStatePayload) => {
+    lastRadioRef.current = payload;
     connectionsRef.current.forEach((c) => {
       try {
         if (c.open) c.send(payload);
@@ -423,6 +425,13 @@ function DriverApp() {
           }
         }
         // Radyo yayını açıksa yeni yolcuyu da hemen bağla
+        if (lastRadioRef.current) {
+          try {
+            conn.send({ ...lastRadioRef.current, ts: Date.now() });
+          } catch {
+            /* ignore */
+          }
+        }
         if (radioStreamRef.current) {
           try {
             peerRef.current?.call(conn.peer, radioStreamRef.current);

@@ -137,10 +137,12 @@ function arp(ctx: AudioContext, out: AudioNode, t: number, dur: number) {
 }
 
 interface JingleOptions {
-  /** Anons sesi (istasyon ID'si veya saat anonsu) */
-  voice: AudioBuffer;
+  /** Anons sesi (istasyon ID'si veya saat anonsu). null ise sadece müzikal jingle çalar. */
+  voice: AudioBuffer | null;
   /** Sadece riser + stab, arp olmadan (saat anonsu için daha sakin) */
   soft?: boolean;
+  /** voice yoksa jingle'ın orta bölümünün süresi (sn) */
+  bedDuration?: number;
 }
 
 /** Jingle'ı çalar, bittiğinde resolve olur. */
@@ -148,19 +150,22 @@ export function playJingle(ctx: AudioContext, out: AudioNode, opts: JingleOption
   const t0 = ctx.currentTime + 0.08;
   const riseDur = opts.soft ? 0.9 : 1.5;
   const voiceAt = t0 + riseDur;
+  const bodyDur = opts.voice ? opts.voice.duration : (opts.bedDuration ?? 2.6);
 
   riser(ctx, out, t0, riseDur);
   impact(ctx, out, voiceAt - 0.05);
-  if (!opts.soft) arp(ctx, out, voiceAt, opts.voice.duration);
+  if (!opts.soft) arp(ctx, out, voiceAt, bodyDur);
 
-  const vg = ctx.createGain();
-  vg.gain.value = 1.25;
-  const src = ctx.createBufferSource();
-  src.buffer = opts.voice;
-  src.connect(vg).connect(out);
-  src.start(voiceAt);
+  if (opts.voice) {
+    const vg = ctx.createGain();
+    vg.gain.value = 1.25;
+    const src = ctx.createBufferSource();
+    src.buffer = opts.voice;
+    src.connect(vg).connect(out);
+    src.start(voiceAt);
+  }
 
-  const endAt = voiceAt + opts.voice.duration;
+  const endAt = voiceAt + bodyDur;
   stab(ctx, out, endAt + 0.05);
 
   const totalMs = (endAt + 1.5 - ctx.currentTime) * 1000;

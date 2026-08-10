@@ -2,7 +2,6 @@
 @source "../src";
 @import "tw-animate-css";
 
-
 @custom-variant dark (&:is(.dark *));
 
 /*
@@ -47,6 +46,8 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-ring-offset-background: var(--background);
+  --color-live: var(--live);
+  --color-live-foreground: var(--live-foreground);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -107,6 +108,9 @@
   --route-line: oklch(0.61 0.22 255);
   --route-line-casing: oklch(0.98 0.005 240);
   --route-line-glow: oklch(0.61 0.22 255 / 0.45);
+  /* Canlı yayın (yeşil) */
+  --live: oklch(0.78 0.19 148);
+  --live-foreground: oklch(0.18 0.02 150);
 }
 
 .dark {
@@ -159,7 +163,10 @@
     min-height: 100vh;
   }
 
-  h1, h2, h3, h4 {
+  h1,
+  h2,
+  h3,
+  h4 {
     font-family: var(--font-display);
     letter-spacing: 0.02em;
   }
@@ -189,18 +196,27 @@
 }
 
 /* MapLibre karanlık tema uyumu */
-.maplibregl-map { font-family: var(--font-display); background: oklch(0.16 0.01 260); }
+.maplibregl-map {
+  font-family: var(--font-display);
+  background: oklch(0.16 0.01 260);
+}
 .maplibregl-ctrl-attrib {
   background: oklch(0.21 0.012 260 / 0.8) !important;
   color: oklch(0.68 0.02 260) !important;
 }
-.maplibregl-ctrl-attrib a { color: var(--color-primary) !important; }
+.maplibregl-ctrl-attrib a {
+  color: var(--color-primary) !important;
+}
 .maplibregl-ctrl-group {
   background: var(--color-card) !important;
   border: 1px solid var(--color-border) !important;
 }
-.maplibregl-ctrl-group button + button { border-top-color: var(--color-border) !important; }
-.maplibregl-ctrl-group button span { filter: invert(1); }
+.maplibregl-ctrl-group button + button {
+  border-top-color: var(--color-border) !important;
+}
+.maplibregl-ctrl-group button span {
+  filter: invert(1);
+}
 .maplibregl-popup-content {
   background: var(--color-card) !important;
   color: var(--color-foreground) !important;
@@ -208,7 +224,10 @@
   border-radius: 8px;
   font-size: 0.8rem;
 }
-.maplibregl-popup-tip { border-top-color: var(--color-card) !important; border-bottom-color: var(--color-card) !important; }
+.maplibregl-popup-tip {
+  border-top-color: var(--color-card) !important;
+  border-bottom-color: var(--color-card) !important;
+}
 
 /* Leaflet karanlık tema uyumu (kullanılmıyor) */
 .leaflet-container {
@@ -222,7 +241,9 @@
   background: oklch(0.21 0.012 260 / 0.8) !important;
   color: oklch(0.68 0.02 260) !important;
 }
-.leaflet-control-attribution a { color: var(--color-primary) !important; }
+.leaflet-control-attribution a {
+  color: var(--color-primary) !important;
+}
 .leaflet-control-zoom a {
   background: var(--color-card) !important;
   color: var(--color-foreground) !important;
@@ -238,6 +259,34 @@
   animation: pulse-ring 2s ease-out infinite;
 }
 @keyframes pulse-ring {
-  0% { box-shadow: 0 0 0 0 oklch(0.62 0.22 25 / 0.6); }
-  100% { box-shadow: 0 0 0 20px oklch(0.62 0.22 25 / 0); }
+  0% {
+    box-shadow: 0 0 0 0 oklch(0.62 0.22 25 / 0.6);
+  }
+  100% {
+    box-shadow: 0 0 0 20px oklch(0.62 0.22 25 / 0);
+  }
+}
+
+@keyframes live-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@utility live-blink {
+  animation: live-blink 1.2s ease-in-out infinite;
+}
+
+@utility live-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--live);
+  box-shadow: 0 0 10px var(--live);
+  animation: live-blink 1.2s ease-in-out infinite;
 }

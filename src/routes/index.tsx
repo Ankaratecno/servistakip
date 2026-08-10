@@ -1,6 +1,6 @@
-import { usePassedStops, trimRoutePath } from "@/lib/passed-stops";
+import { usePassedStops } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
 import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
@@ -24,8 +24,6 @@ import type { RadioStatePayload } from "@/lib/radio";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
 import type { DayLog, JourneyPayload } from "@/lib/journey-log";
-
-const MapView = lazy(() => import("@/components/MapView"));
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -175,10 +173,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const busPos = driver ? { lat: driver.lat, lng: driver.lng } : null;
   const passedIds = usePassedStops(stops, busPos, null);
   const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
-  const activeRoutePath = useMemo(
-    () => trimRoutePath(routePath, busPos),
-    [routePath, busPos?.lat, busPos?.lng],
-  );
 
   useEffect(() => {
     setBaseStops(getStops());
@@ -361,329 +355,420 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     }
   }, [eta?.distanceM, selectedStop?.id, alertOn]);
 
-  return (
-    <div className="min-h-screen flex flex-col">
-      <Header right={<DataSheet day={day} />} />
+  // --- Sekmeli yolcu paneli (kaydırmalı) ---
+  const TABS = [
+    { id: "takip", label: "Takip", icon: "🚌" },
+    { id: "radyo", label: "Radyo", icon: "📻" },
+    { id: "uyari", label: "Uyarı", icon: "🔔" },
+    { id: "bilgi", label: "Bilgi", icon: "ℹ️" },
+    { id: "harita", label: "Harita", icon: "🗺️" },
+  ] as const;
+  const [tab, setTab] = useState(0);
+  const touchRef = useRef<{ x: number; y: number } | null>(null);
 
-      <main className="flex-1 flex flex-col lg:flex-row gap-4 p-4 max-w-7xl w-full mx-auto">
-        {/* Sol panel - durak seçimi & ETA */}
-        <div className="lg:w-96 flex flex-col gap-4">
-          <button
-            onClick={onBack}
-            className="panel px-4 py-3 flex items-center gap-2 hover:bg-muted/50 transition text-sm font-semibold uppercase tracking-wider"
-          >
-            <span>←</span>
-            <span>Plaka Ekranına Dön</span>
-          </button>
-          <StatusBadge status={status} />
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0]!;
+    touchRef.current = { x: t.clientX, y: t.clientY };
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    const start = touchRef.current;
+    touchRef.current = null;
+    if (!start) return;
+    const t = e.changedTouches[0]!;
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    setTab((v) => Math.min(TABS.length - 1, Math.max(0, v + (dx < 0 ? 1 : -1))));
+  };
 
-          <div className="panel p-5">
-            <div className="flex items-center justify-between mb-2">
-              <div className="hud-label">Servis Radyosu</div>
-              <span className="text-[11px] font-mono text-muted-foreground">
-                {radio?.playing ? "CANLI" : "YAYIN YOK"}
-              </span>
+  const radioLive = Boolean(radio?.playing);
+
+  const takipTab = (
+    <div className="flex flex-col gap-4">
+      <StatusBadge status={status} />
+
+      <div className="panel p-5">
+        <div className="hud-label mb-3">Durağınız</div>
+        <select
+          value={selectedStopId ?? ""}
+          onChange={(e) => setSelectedStopId(e.target.value)}
+          className="w-full bg-input border border-border rounded-md px-3 py-3 text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-primary"
+        >
+          {stops
+            .filter((s) => s.kind === "stop")
+            .map((s, i) => (
+              <option key={s.id} value={s.id}>
+                {i + 1}. {s.name}
+              </option>
+            ))}
+        </select>
+      </div>
+
+      <div className="panel p-6 relative overflow-hidden">
+        <div className="hud-label mb-2">Tahmini Varış</div>
+        {status !== "connected" ? (
+          <div>
+            <div className="text-3xl font-bold text-muted-foreground">
+              {status === "offline" || status === "idle" ? "Servis Çevrimdışı" : "Bağlanıyor..."}
             </div>
-            <div className="rounded-md border border-border p-3">
-              <div className="hud-label mb-1">Şu An Çalıyor</div>
-              <div className="font-bold truncate">
-                {radio?.playing && radio.title ? radio.title : "—"}
-              </div>
-              {radio && radio.total > 0 && (
-                <div className="text-[11px] font-mono text-muted-foreground mt-1">
-                  {radio.index + 1}/{radio.total}
-                </div>
-              )}
-            </div>
-            <button
-              onClick={() => setRadioOn((v) => !v)}
-              className={`mt-3 w-full py-3 rounded-md font-bold tracking-wide transition ${
-                radioOn
-                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                  : "border border-border hover:bg-muted/50"
-              }`}
-            >
-              {radioOn ? "🔊 Radyo Açık" : "🔈 Radyoyu Aç"}
-            </button>
-            <div className="flex items-center gap-3 mt-3">
-              <span className="hud-label">Ses</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={radioVolume}
-                onChange={(e) => setRadioVolume(Number(e.target.value))}
-                className="flex-1 accent-primary"
-                aria-label="Radyo ses seviyesi"
-              />
-              <span className="text-xs font-mono w-10 text-right">
-                {Math.round(radioVolume * 100)}%
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">
-              Şoför müzik yayınına başladığında ses otomatik gelir; tarayıcı izni için bir kez
-              "Radyoyu Aç"a dokunman gerekebilir.
+            <p className="text-sm text-muted-foreground mt-2">
+              Şoför sistemi başlattığında otomatik bağlanılacak.
             </p>
-            <audio ref={radioAudioRef} autoPlay playsInline className="hidden" />
           </div>
-
-          <DriverAlertPanel
-            connected={status === "connected"}
-            stop={selectedStop}
-            send={(p) => {
-              const c = connRef.current;
-              if (!c || !c.open) return false;
-              try {
-                c.send(p);
-                return true;
-              } catch {
-                return false;
-              }
-            }}
-          />
-
-          <div className="panel p-5">
-            <div className="flex items-center justify-between mb-2">
-              <div className="hud-label">Servis Geliyor Uyarısı</div>
-              <button
-                onClick={() => {
-                  const next = !alertOn;
-                  setAlertOn(next);
-                  setApproachAlertOn(next);
-                }}
-                className={`text-xs font-bold px-3 py-1.5 rounded-md border transition ${
-                  alertOn
-                    ? "bg-primary text-primary-foreground border-transparent"
-                    : "border-border text-muted-foreground hover:bg-muted/50"
-                }`}
-                aria-pressed={alertOn}
-              >
-                {alertOn ? "AÇIK" : "KAPALI"}
-              </button>
+        ) : !etaText ? (
+          <div className="text-2xl text-muted-foreground">Hesaplanıyor...</div>
+        ) : (
+          <>
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-5xl font-bold text-primary font-mono">{etaText.minutes}</span>
+              <span className="text-lg text-muted-foreground">dakika</span>
+              <span className="text-3xl font-bold text-primary font-mono ml-2">{etaText.secs}</span>
+              <span className="text-lg text-muted-foreground">saniye</span>
             </div>
-            <div className="text-sm">
-              {approachStage === "arriving" ? (
-                <span className="text-primary font-bold">🚨 Servis geliyor — 200 m içinde!</span>
-              ) : approachStage === "near" ? (
-                <span className="font-semibold">📳 Servis yaklaşıyor — 500 m içinde</span>
-              ) : (
-                <span className="text-muted-foreground">
-                  500 m kala titreşim, 200 m kala alarm + bildirim gönderilir.
-                </span>
-              )}
-            </div>
+            <p className="text-sm text-muted-foreground mt-3">
+              sonra <span className="text-foreground font-semibold">{selectedStop?.name}</span>{" "}
+              durağınızda.
+            </p>
             {eta && (
-              <div className="text-[11px] font-mono text-muted-foreground mt-1">
-                DURAĞA KALAN: {Math.round(eta.distanceM)} M
+              <p className="text-xs text-muted-foreground mt-2 font-mono">
+                MESAFE: {(eta.distanceM / 1000).toFixed(2)} KM
+              </p>
+            )}
+            {eta && eta.viaStops > 0 && (
+              <p className="text-xs text-muted-foreground mt-1 font-mono">
+                ÖNCE {eta.viaStops} DURAĞA UĞRAYACAK (+{Math.round(eta.dwellS / 60)} DK BEKLEME)
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      {driver && status === "connected" && (
+        <div className="panel p-5">
+          <div className="hud-label mb-3">Canlı Telemetri</div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <div className="hud-label mb-1">Hız</div>
+              <div className="text-3xl font-mono font-bold text-primary">
+                {Math.round(driver.speedKmh)}
+                <span className="text-xs text-muted-foreground ml-1">km/s</span>
               </div>
-            )}
-            {!notifyReady && (
-              <button
-                onClick={() => void ensureNotificationPermission().then(setNotifyReady)}
-                className="mt-3 w-full py-2.5 rounded-md border border-border text-sm font-semibold hover:bg-muted/50 transition"
-              >
-                🔔 Bildirim İznini Ver
-              </button>
-            )}
-          </div>
-
-          <WeatherCard
-            position={driver ? { lat: driver.lat, lng: driver.lng } : null}
-            subtitle="Servisin bulunduğu noktanın anlık havası · Open-Meteo (ücretsiz)"
-          />
-
-          {/* 10. madde: otomatik durak anonsu + ani fren bilgisi */}
-          <div className="panel p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="hud-label">Durak Anonsu & Ani Fren</div>
-              <button
-                onClick={() => setAnnounceOn((v) => !v)}
-                className={`text-xs font-bold px-3 py-1.5 rounded-md border transition ${
-                  announceOn
-                    ? "bg-primary text-primary-foreground border-transparent"
-                    : "border-border text-muted-foreground hover:bg-muted/50"
-                }`}
-                aria-pressed={announceOn}
-              >
-                {announceOn ? "SESLİ" : "SESSİZ"}
-              </button>
             </div>
-            <div className="rounded-md border border-border p-3">
-              <div className="hud-label mb-1">Yaklaşan Durak</div>
-              <div className="font-bold truncate">{announce ? announce.stopName : "—"}</div>
-              {announce && (
-                <div className="text-[11px] font-mono text-muted-foreground mt-1">
-                  {new Date(announce.ts).toLocaleTimeString("tr-TR")} · {announce.distanceM} M
-                </div>
-              )}
+            <div>
+              <div className="hud-label mb-1">Durum</div>
+              <div className="text-lg font-semibold text-foreground">
+                {driver.speedKmh > 3 ? "Hareket Halinde" : "Duruyor"}
+              </div>
             </div>
-
-            <div className="hud-label mt-4 mb-2">Ani Fren</div>
-            {brakes.length === 0 ? (
-              <div className="text-sm text-muted-foreground">
-                Ani fren algılanmadı. Sert frenler burada anında listelenir.
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
-                {brakes.map((b) => (
-                  <div
-                    key={b.ts}
-                    className="flex items-center gap-3 px-3 py-2 rounded-md border border-border text-sm"
-                  >
-                    <span className="text-lg">{b.level === "sert" ? "🛑" : "⚠️"}</span>
-                    <div className="flex-1">
-                      <div className="font-semibold">
-                        {b.level === "sert" ? "Sert fren" : "Ani fren"} · {b.g.toFixed(2)} g
-                      </div>
-                      <div className="text-[11px] font-mono text-muted-foreground">
-                        {new Date(b.ts).toLocaleTimeString("tr-TR")} · {b.speedKmh} km/s
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
-
-          <div className="panel p-5">
-            <div className="hud-label mb-3">Durağınız</div>
-            <select
-              value={selectedStopId ?? ""}
-              onChange={(e) => setSelectedStopId(e.target.value)}
-              className="w-full bg-input border border-border rounded-md px-3 py-3 text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-primary"
-            >
-              {stops
-                .filter((s) => s.kind === "stop")
-                .map((s, i) => (
-                  <option key={s.id} value={s.id}>
-                    {i + 1}. {s.name}
-                  </option>
-                ))}
-            </select>
-          </div>
-
-          <div className="panel p-6 relative overflow-hidden">
-            <div className="hud-label mb-2">Tahmini Varış</div>
-            {status !== "connected" ? (
+          {(driver.avgSpeedKmh !== undefined ||
+            driver.totalKm !== undefined ||
+            driver.maxSpeedKmh !== undefined) && (
+            <div className="grid grid-cols-3 gap-4 mt-4">
               <div>
-                <div className="text-3xl font-bold text-muted-foreground">
-                  {status === "offline" || status === "idle"
-                    ? "Servis Çevrimdışı"
-                    : "Bağlanıyor..."}
+                <div className="hud-label mb-1">Ortalama Hız</div>
+                <div className="text-xl font-mono font-bold">
+                  {Math.round(driver.avgSpeedKmh ?? 0)}
+                  <span className="text-xs text-muted-foreground ml-1">km/s</span>
                 </div>
-                <p className="text-sm text-muted-foreground mt-2">
-                  Şoför sistemi başlattığında otomatik bağlanılacak.
-                </p>
               </div>
-            ) : !etaText ? (
-              <div className="text-2xl text-muted-foreground">Hesaplanıyor...</div>
-            ) : (
-              <>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-5xl font-bold text-primary font-mono">
-                    {etaText.minutes}
-                  </span>
-                  <span className="text-lg text-muted-foreground">dakika</span>
-                  <span className="text-3xl font-bold text-primary font-mono ml-2">
-                    {etaText.secs}
-                  </span>
-                  <span className="text-lg text-muted-foreground">saniye</span>
+              <div>
+                <div className="hud-label mb-1">Zirve Hız</div>
+                <div className="text-xl font-mono font-bold">
+                  {Math.round(driver.maxSpeedKmh ?? 0)}
+                  <span className="text-xs text-muted-foreground ml-1">km/s</span>
                 </div>
-                <p className="text-sm text-muted-foreground mt-3">
-                  sonra <span className="text-foreground font-semibold">{selectedStop?.name}</span>{" "}
-                  durağınızda.
-                </p>
-                {eta && (
-                  <p className="text-xs text-muted-foreground mt-2 font-mono">
-                    MESAFE: {(eta.distanceM / 1000).toFixed(2)} KM
-                  </p>
-                )}
-                {eta && eta.viaStops > 0 && (
-                  <p className="text-xs text-muted-foreground mt-1 font-mono">
-                    ÖNCE {eta.viaStops} DURAĞA UĞRAYACAK (+{Math.round(eta.dwellS / 60)} DK BEKLEME)
-                  </p>
-                )}
-              </>
-            )}
-          </div>
+              </div>
+              <div>
+                <div className="hud-label mb-1">Toplam KM</div>
+                <div className="text-xl font-mono font-bold">
+                  {(driver.totalKm ?? 0).toFixed(1)}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
-          {driver && status === "connected" && (
-            <div className="panel p-5">
-              <div className="hud-label mb-3">Canlı Telemetri</div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <div className="hud-label mb-1">Hız</div>
-                  <div className="text-3xl font-mono font-bold text-primary">
-                    {Math.round(driver.speedKmh)}
-                    <span className="text-xs text-muted-foreground ml-1">km/s</span>
-                  </div>
-                </div>
-                <div>
-                  <div className="hud-label mb-1">Durum</div>
-                  <div className="text-lg font-semibold text-foreground">
-                    {driver.speedKmh > 3 ? "Hareket Halinde" : "Duruyor"}
-                  </div>
-                </div>
-              </div>
-              {(driver.avgSpeedKmh !== undefined ||
-                driver.totalKm !== undefined ||
-                driver.maxSpeedKmh !== undefined) && (
-                <div className="grid grid-cols-3 gap-4 mt-4">
-                  <div>
-                    <div className="hud-label mb-1">Ortalama Hız</div>
-                    <div className="text-xl font-mono font-bold">
-                      {Math.round(driver.avgSpeedKmh ?? 0)}
-                      <span className="text-xs text-muted-foreground ml-1">km/s</span>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="hud-label mb-1">Zirve Hız</div>
-                    <div className="text-xl font-mono font-bold">
-                      {Math.round(driver.maxSpeedKmh ?? 0)}
-                      <span className="text-xs text-muted-foreground ml-1">km/s</span>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="hud-label mb-1">Toplam KM</div>
-                    <div className="text-xl font-mono font-bold">
-                      {(driver.totalKm ?? 0).toFixed(1)}
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div className="hud-label mt-4">Araç</div>
-              <div className="text-sm text-foreground mt-1">
-                {SERVICE_INFO.vehicle} · {SERVICE_INFO.year}
-              </div>
-              <div className="text-xs font-mono text-primary mt-1">{driver.plate}</div>
+  const radyoTab = (
+    <div className="flex flex-col gap-4">
+      <div className="panel p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className="hud-label">Servis Radyosu</div>
+          {radioLive ? (
+            <span className="flex items-center gap-2 text-[11px] font-mono font-bold text-live live-blink">
+              <span className="live-dot" />
+              CANLI
+            </span>
+          ) : (
+            <span className="text-[11px] font-mono text-muted-foreground">YAYIN YOK</span>
+          )}
+        </div>
+        <div className="rounded-md border border-border p-3">
+          <div className="hud-label mb-1">{SERVICE_INFO.plate}'te Şu An Çalıyor</div>
+          <div className="font-bold text-lg truncate">
+            {radioLive && radio?.title ? `"${radio.title}"` : "—"}
+          </div>
+          {radioLive && (
+            <div className="text-[11px] font-mono font-bold text-live live-blink mt-1">YAYINDA</div>
+          )}
+        </div>
+        <button
+          onClick={() => setRadioOn((v) => !v)}
+          className={`mt-3 w-full py-3 rounded-md font-bold tracking-wide transition ${
+            radioOn
+              ? "bg-primary text-primary-foreground hover:bg-primary/90"
+              : "border border-border hover:bg-muted/50"
+          }`}
+        >
+          {radioOn ? "🔊 Radyo Açık" : "🔈 Radyoyu Aç"}
+        </button>
+        <div className="flex items-center gap-3 mt-3">
+          <span className="hud-label">Ses</span>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={radioVolume}
+            onChange={(e) => setRadioVolume(Number(e.target.value))}
+            className="flex-1 accent-primary"
+            aria-label="Radyo ses seviyesi"
+          />
+          <span className="text-xs font-mono w-10 text-right">
+            {Math.round(radioVolume * 100)}%
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">
+          Şoför müzik yayınına başladığında ses otomatik gelir; tarayıcı izni için bir kez "Radyoyu
+          Aç"a dokunman gerekebilir.
+        </p>
+        <audio ref={radioAudioRef} autoPlay playsInline className="hidden" />
+      </div>
+    </div>
+  );
+
+  const uyariTab = (
+    <div className="flex flex-col gap-4">
+      <DriverAlertPanel
+        connected={status === "connected"}
+        stop={selectedStop}
+        send={(p) => {
+          const c = connRef.current;
+          if (!c || !c.open) return false;
+          try {
+            c.send(p);
+            return true;
+          } catch {
+            return false;
+          }
+        }}
+      />
+
+      <div className="panel p-5">
+        <div className="flex items-center justify-between mb-2">
+          <div className="hud-label">Servis Geliyor Uyarısı</div>
+          <button
+            onClick={() => {
+              const next = !alertOn;
+              setAlertOn(next);
+              setApproachAlertOn(next);
+            }}
+            className={`text-xs font-bold px-3 py-1.5 rounded-md border transition ${
+              alertOn
+                ? "bg-primary text-primary-foreground border-transparent"
+                : "border-border text-muted-foreground hover:bg-muted/50"
+            }`}
+            aria-pressed={alertOn}
+          >
+            {alertOn ? "AÇIK" : "KAPALI"}
+          </button>
+        </div>
+        <div className="text-sm">
+          {approachStage === "arriving" ? (
+            <span className="text-primary font-bold">🚨 Servis geliyor — 200 m içinde!</span>
+          ) : approachStage === "near" ? (
+            <span className="font-semibold">📳 Servis yaklaşıyor — 500 m içinde</span>
+          ) : (
+            <span className="text-muted-foreground">
+              500 m kala titreşim, 200 m kala alarm + bildirim gönderilir.
+            </span>
+          )}
+        </div>
+        {eta && (
+          <div className="text-[11px] font-mono text-muted-foreground mt-1">
+            DURAĞA KALAN: {Math.round(eta.distanceM)} M
+          </div>
+        )}
+        {!notifyReady && (
+          <button
+            onClick={() => void ensureNotificationPermission().then(setNotifyReady)}
+            className="mt-3 w-full py-2.5 rounded-md border border-border text-sm font-semibold hover:bg-muted/50 transition"
+          >
+            🔔 Bildirim İznini Ver
+          </button>
+        )}
+      </div>
+
+      <div className="panel p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className="hud-label">Durak Anonsu & Ani Fren</div>
+          <button
+            onClick={() => setAnnounceOn((v) => !v)}
+            className={`text-xs font-bold px-3 py-1.5 rounded-md border transition ${
+              announceOn
+                ? "bg-primary text-primary-foreground border-transparent"
+                : "border-border text-muted-foreground hover:bg-muted/50"
+            }`}
+            aria-pressed={announceOn}
+          >
+            {announceOn ? "SESLİ" : "SESSİZ"}
+          </button>
+        </div>
+        <div className="rounded-md border border-border p-3">
+          <div className="hud-label mb-1">Yaklaşan Durak</div>
+          <div className="font-bold truncate">{announce ? announce.stopName : "—"}</div>
+          {announce && (
+            <div className="text-[11px] font-mono text-muted-foreground mt-1">
+              {new Date(announce.ts).toLocaleTimeString("tr-TR")} · {announce.distanceM} M
             </div>
           )}
         </div>
 
-        {/* Harita */}
-        <div className="flex-1 panel overflow-hidden h-[65vh] min-h-[400px] lg:h-[calc(100vh-8rem)] lg:min-h-[600px] lg:max-h-[800px] lg:self-start lg:sticky lg:top-4">
-          <Suspense fallback={null}>
-            <MapView
-              stops={activeStops}
-              selectedStopId={selectedStopId}
-              busPosition={busPos}
-              routePath={activeRoutePath}
-              className="h-full"
-            />
-          </Suspense>
+        <div className="hud-label mt-4 mb-2">Ani Fren</div>
+        {brakes.length === 0 ? (
+          <div className="text-sm text-muted-foreground">
+            Ani fren algılanmadı. Sert frenler burada anında listelenir.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
+            {brakes.map((b) => (
+              <div
+                key={b.ts}
+                className="flex items-center gap-3 px-3 py-2 rounded-md border border-border text-sm"
+              >
+                <span className="text-lg">{b.level === "sert" ? "🛑" : "⚠️"}</span>
+                <div className="flex-1">
+                  <div className="font-semibold">
+                    {b.level === "sert" ? "Sert fren" : "Ani fren"} · {b.g.toFixed(2)} g
+                  </div>
+                  <div className="text-[11px] font-mono text-muted-foreground">
+                    {new Date(b.ts).toLocaleTimeString("tr-TR")} · {b.speedKmh} km/s
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const bilgiTab = (
+    <div className="flex flex-col gap-4">
+      <WeatherCard
+        position={driver ? { lat: driver.lat, lng: driver.lng } : null}
+        subtitle="Servisin bulunduğu noktanın anlık havası · Open-Meteo (ücretsiz)"
+      />
+
+      <div className="panel p-5">
+        <div className="hud-label mb-3">Araç</div>
+        <div className="text-lg font-bold">
+          {SERVICE_INFO.vehicle} · {SERVICE_INFO.year}
+        </div>
+        <div className="text-xs text-muted-foreground mt-1">{SERVICE_INFO.operator}</div>
+        <div className="text-sm font-mono text-primary mt-2">{SERVICE_INFO.plate}</div>
+      </div>
+
+      <div className="panel p-5">
+        <div className="hud-label mb-3">Bağlantı</div>
+        <StatusBadge status={status} />
+        <button
+          onClick={onBack}
+          className="mt-3 w-full py-2.5 rounded-md border border-border text-sm font-semibold hover:bg-muted/50 transition"
+        >
+          ← Plaka Ekranına Dön
+        </button>
+        <div className="mt-4 pt-3 border-t border-border flex justify-between text-xs">
+          <Link to="/driver" className="text-muted-foreground hover:text-primary">
+            → Şoför Girişi
+          </Link>
+          <Link to="/admin" className="text-muted-foreground hover:text-primary">
+            → Durak Yönetimi
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+
+  const haritaTab = (
+    <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-center px-4">
+      <div className="text-5xl">🚧</div>
+      <div className="text-2xl font-bold text-foreground">3D yapımı devam ediyor</div>
+      <p className="text-sm text-muted-foreground max-w-xs">
+        Harita altyapısı hazırlanıyor. Çok yakında burada interaktif 3D harita olacak.
+      </p>
+    </div>
+  );
+
+  const panes = [takipTab, radyoTab, uyariTab, bilgiTab, haritaTab];
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Header right={<DataSheet day={day} onReset={() => setDay(null)} />} />
+
+      <main
+        className="flex-1 w-full max-w-3xl mx-auto p-4 pb-28"
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <div className="hud-label">{TABS[tab]!.label}</div>
+          <div className="flex items-center gap-1.5">
+            {TABS.map((t, i) => (
+              <span
+                key={t.id}
+                className={`h-1.5 rounded-full transition-all ${
+                  i === tab ? "w-5 bg-primary" : "w-1.5 bg-border"
+                }`}
+              />
+            ))}
+          </div>
+        </div>
+        <div key={TABS[tab]!.id} className="animate-in fade-in slide-in-from-right-4 duration-200">
+          {panes[tab]}
         </div>
       </main>
 
-      <footer className="text-center text-xs text-muted-foreground py-4 border-t border-border">
-        <Link to="/driver" className="hover:text-primary mx-2">
-          Şoför Girişi
-        </Link>
-        ·
-        <Link to="/admin" className="hover:text-primary mx-2">
-          Durak Yönetimi
-        </Link>
-      </footer>
+      <nav className="fixed bottom-0 inset-x-0 z-40 border-t border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
+        <div className="max-w-3xl mx-auto grid grid-cols-5">
+          {TABS.map((t, i) => {
+            const active = i === tab;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(i)}
+                aria-current={active ? "page" : undefined}
+                className={`relative flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold uppercase tracking-wider transition ${
+                  active ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <span className="text-lg leading-none">{t.icon}</span>
+                <span className="truncate">{t.label}</span>
+                {t.id === "radyo" && radioLive && (
+                  <span className="absolute top-1.5 right-1/2 translate-x-4 live-dot" />
+                )}
+                {active && (
+                  <span className="absolute top-0 inset-x-3 h-0.5 rounded-full bg-primary" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <div className="h-[env(safe-area-inset-bottom)]" />
+      </nav>
     </div>
   );
 }

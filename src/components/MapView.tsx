@@ -4,6 +4,27 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Stop } from "@/lib/stops";
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/dark";
+const QUALITY_KEY = "acrob.map.quality";
+
+/** Hafif modda çizilmeye devam edecek temel katmanlar. */
+const KEEP_BASE_LAYERS = new Set([
+  "background",
+  "water",
+  "waterway",
+  "aeroway-taxiway",
+  "aeroway-runway-casing",
+  "aeroway-runway",
+  "road_area_pier",
+  "road_pier",
+  "highway_path",
+  "highway_minor",
+  "highway_major_casing",
+  "highway_major_inner",
+  "highway_major_subtle",
+  "highway_motorway_casing",
+  "highway_motorway_inner",
+  "highway_motorway_subtle",
+]);
 
 export interface MapViewProps {
   stops: Stop[];
@@ -69,7 +90,7 @@ export default function MapView({
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
-  const markersRef = useRef<maplibregl.Marker[]>([]);
+  const markersRef = useRef<Map<string, { marker: maplibregl.Marker; key: string }>>(new Map());
   const busMarkerRef = useRef<maplibregl.Marker | null>(null);
   const loadedRef = useRef(false);
   const clickRef = useRef(onMapClick);
@@ -77,12 +98,50 @@ export default function MapView({
   const [ready, setReady] = useState(false);
   const [pitch, setPitch] = useState(55);
   const [follow, setFollow] = useState(true);
+  // 18. madde: düşük cihazlar için performans anahtarı (3D bina + etiketler)
+  const [highQuality, setHighQuality] = useState(false);
   const headingRef = useRef(0);
   const lastPosRef = useRef<{ lat: number; lng: number } | null>(null);
+  const headingIdxRef = useRef(0);
+  // 15. madde: her fix'te easeTo yerine tek bir rAF döngüsüyle yumuşak kamera
+  const camTargetRef = useRef<{ lng: number; lat: number; bearing: number } | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const followRef = useRef(follow);
+  followRef.current = follow;
+  // 19. madde: harita görünmezken render / kamera döngüsü durur
+  const pausedRef = useRef(false);
+
+  const startCamLoop = () => {
+    if (rafRef.current != null) return;
+    const step = () => {
+      rafRef.current = null;
+      const map = mapRef.current;
+      const t = camTargetRef.current;
+      if (!map || !t || !followRef.current || pausedRef.current) return;
+      const c = map.getCenter();
+      const b = map.getBearing();
+      const diff = ((t.bearing - b + 540) % 360) - 180;
+      const done =
+        Math.abs(t.lng - c.lng) < 1e-6 && Math.abs(t.lat - c.lat) < 1e-6 && Math.abs(diff) < 0.25;
+      map.jumpTo(
+        done
+          ? { center: [t.lng, t.lat], bearing: t.bearing }
+          : {
+              center: [c.lng + (t.lng - c.lng) * 0.18, c.lat + (t.lat - c.lat) * 0.18],
+              bearing: b + diff * 0.14,
+            },
+      );
+      if (!done) rafRef.current = requestAnimationFrame(step);
+    };
+    rafRef.current = requestAnimationFrame(step);
+  };
 
   // Harita kurulum
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+    const savedQuality =
+      typeof window !== "undefined" && window.localStorage.getItem(QUALITY_KEY) === "high";
+    if (savedQuality) setHighQuality(true);
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: MAP_STYLE,
@@ -118,30 +177,6 @@ export default function MapView({
 
     map.on("load", () => {
       loadedRef.current = true;
-
-      // Düşük donanım modu: perspektif 3D kalır; binalar, arazi alanları,
-      // yer adları ve desenler çizilmez. Yalnızca yollar, su ve rota görünür.
-      const keepBaseLayers = new Set([
-        "background",
-        "water",
-        "waterway",
-        "aeroway-taxiway",
-        "aeroway-runway-casing",
-        "aeroway-runway",
-        "road_area_pier",
-        "road_pier",
-        "highway_path",
-        "highway_minor",
-        "highway_major_casing",
-        "highway_major_inner",
-        "highway_major_subtle",
-        "highway_motorway_casing",
-        "highway_motorway_inner",
-        "highway_motorway_subtle",
-      ]);
-      map.getStyle().layers.forEach((layer) => {
-        if (!keepBaseLayers.has(layer.id)) map.setLayoutProperty(layer.id, "visibility", "none");
-      });
 
       // Ara nokta katmanı (DOM işaretçisi yerine GPU)
       map.addSource("acrob-waypoints", {
@@ -194,9 +229,42 @@ export default function MapView({
     );
     // Kullanıcı haritayı elle sürüklerse takibi bırak
     map.on("dragstart", () => setFollow(false));
+
+    // 19. madde: sekme arka plandayken veya harita ekran dışındayken render'ı durdur
+    const setPaused = (p: boolean) => {
+      if (pausedRef.current === p) return;
+      pausedRef.current = p;
+      if (p) {
+        map.stop();
+        if (rafRef.current != null) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+      } else {
+        map.resize();
+        map.triggerRepaint();
+        if (followRef.current && camTargetRef.current) startCamLoop();
+      }
+    };
+    const onVis = () => setPaused(document.hidden || !onScreenRef.current);
+    const onScreenRef = { current: true };
+    const io = new IntersectionObserver(
+      (entries) => {
+        onScreenRef.current = entries.some((e) => e.isIntersecting);
+        setPaused(document.hidden || !onScreenRef.current);
+      },
+      { threshold: 0.01 },
+    );
+    io.observe(containerRef.current);
+    document.addEventListener("visibilitychange", onVis);
+
     mapRef.current = map;
     return () => {
       ro.disconnect();
+      io.disconnect();
+      document.removeEventListener("visibilitychange", onVis);
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
       map.remove();
       mapRef.current = null;
       loadedRef.current = false;
@@ -204,6 +272,57 @@ export default function MapView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 18. madde: kalite modu — hafif (yalnız yollar/su) ↔ yüksek (etiket + 3D bina)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const layers = map.getStyle().layers ?? [];
+    layers.forEach((layer) => {
+      if (layer.id.startsWith("acrob-")) return;
+      const visible = highQuality || KEEP_BASE_LAYERS.has(layer.id);
+      map.setLayoutProperty(layer.id, "visibility", visible ? "visible" : "none");
+    });
+
+    const has3d = !!map.getLayer("acrob-buildings-3d");
+    if (highQuality && !has3d) {
+      const vectorSource = Object.entries(map.getStyle().sources ?? {}).find(
+        ([, s]) => (s as { type?: string }).type === "vector",
+      )?.[0];
+      if (vectorSource) {
+        try {
+          map.addLayer(
+            {
+              id: "acrob-buildings-3d",
+              type: "fill-extrusion",
+              source: vectorSource,
+              "source-layer": "building",
+              minzoom: 13.5,
+              paint: {
+                "fill-extrusion-color": "#2b303c",
+                "fill-extrusion-height": [
+                  "coalesce",
+                  ["get", "render_height"],
+                  ["get", "height"],
+                  8,
+                ],
+                "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+                "fill-extrusion-opacity": 0.9,
+              },
+            } as never,
+            map.getLayer("acrob-route-casing") ? "acrob-route-casing" : undefined,
+          );
+        } catch {
+          /* stilde bina katmanı yoksa sessizce geç */
+        }
+      }
+    } else if (!highQuality && has3d) {
+      map.removeLayer("acrob-buildings-3d");
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(QUALITY_KEY, highQuality ? "high" : "light");
+    }
+  }, [highQuality, ready]);
 
   // İmleç (admin tıklama modu)
   useEffect(() => {
@@ -232,9 +351,8 @@ export default function MapView({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    markersRef.current.forEach((m) => m.remove());
-    markersRef.current = [];
-
+    // 16. madde: işaretçiler yeniden oluşturulmaz, mevcut olanlar güncellenir
+    const alive = new Set<string>();
     const wp: Array<Record<string, unknown>> = [];
     stops.forEach((s) => {
       if (s.kind === "waypoint") {
@@ -245,13 +363,33 @@ export default function MapView({
         });
         return;
       }
+      alive.add(s.id);
+      const key = `${s.lat},${s.lng},${s.order},${s.name},${s.id === selectedStopId ? 1 : 0}`;
+      const existing = markersRef.current.get(s.id);
+      if (existing) {
+        if (existing.key === key) return;
+        existing.marker.setLngLat([s.lng, s.lat]);
+        existing.marker
+          .getPopup()
+          ?.setText(`${s.order}. ${s.name}`);
+        const el = existing.marker.getElement();
+        el.style.cssText = stopEl(s.id === selectedStopId, false).style.cssText;
+        markersRef.current.set(s.id, { marker: existing.marker, key });
+        return;
+      }
       const marker = new maplibregl.Marker({ element: stopEl(s.id === selectedStopId, false) })
         .setLngLat([s.lng, s.lat])
         .addTo(map);
       marker.setPopup(
         new maplibregl.Popup({ offset: 16, closeButton: false }).setText(`${s.order}. ${s.name}`),
       );
-      markersRef.current.push(marker);
+      markersRef.current.set(s.id, { marker, key });
+    });
+
+    markersRef.current.forEach((entry, id) => {
+      if (alive.has(id)) return;
+      entry.marker.remove();
+      markersRef.current.delete(id);
     });
 
     const src = map.getSource("acrob-waypoints") as maplibregl.GeoJSONSource | undefined;
@@ -281,6 +419,7 @@ export default function MapView({
       busMarkerRef.current?.remove();
       busMarkerRef.current = null;
       lastPosRef.current = null;
+      camTargetRef.current = null;
       return;
     }
 
@@ -293,15 +432,20 @@ export default function MapView({
     ) {
       target = bearingBetween(prev, busPosition);
     } else if (routePath && routePath.length > 1) {
-      let bi = 0;
+      // 17. madde: tüm rotayı taramak yerine son indeksten dar pencere
+      const start = Math.max(0, Math.min(headingIdxRef.current, routePath.length - 1));
+      const end = Math.min(routePath.length - 1, start + 80);
+      let bi = start;
       let bd = Infinity;
-      routePath.forEach(([la, ln], i) => {
+      for (let i = start; i <= end; i++) {
+        const [la, ln] = routePath[i]!;
         const d = (la - busPosition.lat) ** 2 + (ln - busPosition.lng) ** 2;
         if (d < bd) {
           bd = d;
           bi = i;
         }
-      });
+      }
+      headingIdxRef.current = bi;
       const nxt = routePath[Math.min(bi + 1, routePath.length - 1)]!;
       const cur = routePath[bi]!;
       if (nxt !== cur) {
@@ -324,19 +468,31 @@ export default function MapView({
     }
     busMarkerRef.current.setRotation(headingRef.current);
 
-    if (follow) {
-      map.easeTo({
-        center: [busPosition.lng, busPosition.lat],
+    if (follow && !pausedRef.current) {
+      camTargetRef.current = {
+        lng: busPosition.lng,
+        lat: busPosition.lat,
         bearing: headingRef.current,
-        pitch: Math.max(pitch, 55),
-        zoom: Math.max(map.getZoom(), 16),
-        offset: [0, map.getContainer().clientHeight * 0.22],
-        duration: 450,
-        easing: (t) => t * (2 - t),
-      });
+      };
+      startCamLoop();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busPosition, ready, follow, pitch]);
+  }, [busPosition, ready, follow]);
+
+  // Takip açıldığında zoom / eğim / kadraj bir kez ayarlanır (her fix'te değil)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !follow || !busPosition) return;
+    map.easeTo({
+      center: [busPosition.lng, busPosition.lat],
+      bearing: headingRef.current,
+      pitch: Math.max(pitch, 45),
+      zoom: Math.max(map.getZoom(), 16),
+      offset: [0, Math.round(map.getContainer().clientHeight * 0.18)],
+      duration: 600,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [follow, ready]);
 
   const togglePitch = () => {
     const map = mapRef.current;
@@ -376,6 +532,17 @@ export default function MapView({
           className="rounded-md border border-border bg-card/90 px-3 py-1.5 text-xs font-semibold text-foreground backdrop-blur transition hover:bg-card"
         >
           {pitch > 10 ? "2D Görünüm" : "3D Görünüm"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setHighQuality((v) => !v)}
+          className={`rounded-md border px-3 py-1.5 text-xs font-semibold backdrop-blur transition ${
+            highQuality
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-card/90 text-foreground hover:bg-card"
+          }`}
+        >
+          {highQuality ? "🏙 3D Bina Açık" : "Hafif Mod"}
         </button>
         <button
           type="button"

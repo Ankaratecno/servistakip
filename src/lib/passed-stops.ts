@@ -98,6 +98,85 @@ export function trimRoutePath(
 }
 
 /**
+ * Rota kırpmanın artımlı (incremental) hâli: her tick'te tüm diziyi taramak
+ * yerine son bilinen indeksten ileri doğru dar bir pencerede arar.
+ * Pencere içinde eşleşme bulunmazsa (sapma / yeni rota) tam taramaya döner.
+ */
+export function trimRoutePathFrom(
+  path: [number, number][] | null | undefined,
+  pos: LatLng | null | undefined,
+  hintIdx: number,
+  window = 80,
+): { path: [number, number][] | null; idx: number } {
+  if (!path || path.length < 2) return { path: path ?? null, idx: 0 };
+  if (!pos) return { path, idx: hintIdx };
+
+  const search = (from: number, to: number) => {
+    let bi = from;
+    let bd = Infinity;
+    for (let i = from; i <= to; i++) {
+      const p = path[i]!;
+      const d = distanceM(pos, { lat: p[0], lng: p[1] });
+      if (d < bd) {
+        bd = d;
+        bi = i;
+      }
+    }
+    return { bi, bd };
+  };
+
+  const start = Math.max(0, Math.min(hintIdx, path.length - 1));
+  let { bi, bd } = search(start, Math.min(path.length - 1, start + window));
+  if (bd > 80) {
+    const full = search(0, path.length - 1);
+    bi = full.bi;
+    bd = full.bd;
+  }
+  if (bd > 80) return { path, idx: hintIdx };
+  if (bi <= 0) return { path, idx: 0 };
+  return { path: [[pos.lat, pos.lng], ...path.slice(bi)], idx: bi };
+}
+
+/**
+ * Kırpılmış rotayı throttle'lı üretir (varsayılan 1.2 sn) — haritayı
+ * her GPS fix'inde yeniden hesaplamaz.
+ */
+export function useTrimmedRoutePath(
+  path: [number, number][] | null | undefined,
+  pos: LatLng | null | undefined,
+  throttleMs = 1200,
+): [number, number][] | null {
+  const idxRef = useRef(0);
+  const lastRef = useRef(0);
+  const sigRef = useRef("");
+  const [out, setOut] = useState<[number, number][] | null>(path ?? null);
+
+  const sig = path ? `${path.length}:${path[0]?.[0]},${path[0]?.[1]}` : "";
+  useEffect(() => {
+    if (sigRef.current === sig) return;
+    sigRef.current = sig;
+    idxRef.current = 0;
+    lastRef.current = 0;
+  }, [sig]);
+
+  useEffect(() => {
+    if (!path || path.length < 2) {
+      setOut(path ?? null);
+      return;
+    }
+    const now = Date.now();
+    if (now - lastRef.current < throttleMs) return;
+    lastRef.current = now;
+    const res = trimRoutePathFrom(path, pos, idxRef.current);
+    idxRef.current = res.idx;
+    setOut(res.path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig, pos?.lat, pos?.lng, throttleMs]);
+
+  return out;
+}
+
+/**
  * Duraklar + araç konumundan "geçilmiş" durak kümesini üretir.
  * Şoför ve yolcu panellerinde aynı şekilde kullanılır.
  */

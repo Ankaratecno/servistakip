@@ -1,8 +1,10 @@
 import { loadResume, saveResume, clearResume, type ResumePoint } from "@/lib/resume";
-import { usePassedStops, trimRoutePath } from "@/lib/passed-stops";
+import { usePassedStops, useTrimmedRoutePath } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
+import { PEER_OPTIONS, reconnectDelay } from "@/lib/peer-config";
+import { isWakeLockSupported, keepScreenAwake, releaseScreenAwake } from "@/lib/wake-lock";
 import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { DRIVER_SESSION_KEY, checkDriverPassword } from "@/lib/driver-auth";
@@ -40,6 +42,7 @@ import {
 
 import {
   avgSpeedKmh,
+  accuracyLabel,
   loadStats,
   resetStats,
   saveStats,
@@ -144,6 +147,8 @@ function DriverApp() {
   const [error, setError] = useState<string | null>(null);
   const [position, setPosition] = useState<GeolocationPosition | null>(null);
   const [peerReady, setPeerReady] = useState(false);
+  const [awake, setAwake] = useState(false);
+  const [gpsWarn, setGpsWarn] = useState<string | null>(null);
   const [connCount, setConnCount] = useState(0);
   const [allStops] = useState<Stop[]>(() => getStops());
   const [startStopId, setStartStopId] = useState<string>("");
@@ -213,10 +218,8 @@ function DriverApp() {
     : null;
   const passedIds = usePassedStops(stops, busPos, position?.coords.accuracy ?? null);
   const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
-  const activeRoutePath = useMemo(
-    () => trimRoutePath(routePath, busPos),
-    [routePath, busPos?.lat, busPos?.lng],
-  );
+  // 17. madde: rota kırpma artık throttle'lı ve son indeksten devam ediyor
+  const activeRoutePath = useTrimmedRoutePath(routePath, busPos);
 
   // 15. madde: son geçilen durak kaydı + kopma sonrası devam
   const [resume, setResume] = useState<ResumePoint | null>(null);
@@ -393,7 +396,7 @@ function DriverApp() {
       return;
     }
 
-    const peer = new Peer(DRIVER_PEER_ID, { debug: 1 });
+    const peer = new Peer(DRIVER_PEER_ID, { ...PEER_OPTIONS });
     peerRef.current = peer;
 
     peer.on("open", () => {
@@ -469,12 +472,12 @@ function DriverApp() {
         // Eski oturum sunucuda hâlâ kayıtlı olabilir (sekme kapansa da ~1-2 dk sürer).
         // Kısa aralıklarla yeniden dene, kullanıcıyı bekletmeden devral.
         stopInternal();
-        if (idRetryRef.current < 6) {
+        if (idRetryRef.current < 8) {
           idRetryRef.current += 1;
           setError(
-            `Önceki yayın oturumu kapanıyor, kimlik devralınıyor… (${idRetryRef.current}/6)`,
+            `Önceki yayın oturumu kapanıyor, kimlik devralınıyor… (${idRetryRef.current}/8)`,
           );
-          window.setTimeout(() => startRef.current(), 5000);
+          window.setTimeout(() => startRef.current(), reconnectDelay(idRetryRef.current - 1));
         } else {
           idRetryRef.current = 0;
           setError(
@@ -491,6 +494,7 @@ function DriverApp() {
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         setPosition(pos);
+        setGpsWarn(null);
         // --- Filtrelenmiş, kalıcı sürüş istatistikleri (IndexedDB) ---
         const now = pos.timestamp || Date.now();
         const gpsSpeed = pos.coords.speed != null ? Math.max(0, pos.coords.speed * 3.6) : null;
@@ -577,8 +581,22 @@ function DriverApp() {
           }
         });
       },
-      (err) => setError(`Konum alınamadı: ${err.message}`),
-      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 },
+      (err) => {
+        // Bulgu 13: izin / sinyal / zaman aşımı ayrımı ve net kullanıcı mesajı
+        if (err.code === err.PERMISSION_DENIED) {
+          setGpsWarn(
+            "Konum izni reddedildi. Tarayıcı ayarlarından bu site için konumu 'İzin ver' yapın.",
+          );
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          setGpsWarn("GPS sinyali alınamıyor. Telefonu cam kenarına alın, konum servisini açın.");
+        } else if (err.code === err.TIMEOUT) {
+          setGpsWarn("GPS gecikti, yeniden deneniyor…");
+        } else {
+          setGpsWarn(`Konum alınamadı: ${err.message}`);
+        }
+      },
+      // Bulgu 14: maximumAge 0 → bayat (takılı) fix kullanılmaz, timeout uzatıldı
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 },
     );
   };
 
@@ -632,6 +650,42 @@ function DriverApp() {
       cancelled = true;
       stop?.();
       setMotionReady(false);
+    };
+  }, [running]);
+
+  // Bulgu 1 & 2: yayın açıkken ekranın kapanmasını engelle (GPS + yayın kesilmesin),
+  // sekme arka plandan dönünce kilidi yeniden al.
+  useEffect(() => {
+    if (!running) {
+      void releaseScreenAwake();
+      setAwake(false);
+      return;
+    }
+    let cancelled = false;
+    void keepScreenAwake().then((ok) => {
+      if (!cancelled) setAwake(ok);
+    });
+    const onVis = () => {
+      if (document.visibilityState !== "visible") return;
+      void keepScreenAwake().then((ok) => {
+        if (!cancelled) setAwake(ok);
+      });
+      // Arka plandan dönüşte bağlantı kopmuşsa yayını toparla
+      const p = peerRef.current;
+      if (p && p.disconnected && !p.destroyed) {
+        try {
+          p.reconnect();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      void releaseScreenAwake();
+      setAwake(false);
     };
   }, [running]);
 
@@ -1016,6 +1070,35 @@ function DriverApp() {
                 />
               </Suspense>
             </div>
+
+            <div className="panel px-4 py-3 flex items-center gap-3 text-sm">
+              <div
+                className={`w-2.5 h-2.5 rounded-full ${peerReady ? "bg-primary animate-pulse" : "bg-yellow-500 animate-pulse"}`}
+              />
+              <span className="font-semibold uppercase tracking-wider">
+                {peerReady ? `Yayın açık · ${connCount} yolcu` : "Bağlanıyor"}
+              </span>
+              <span className="ml-auto hud-label">
+                {awake
+                  ? "Ekran açık tutuluyor"
+                  : isWakeLockSupported()
+                    ? "Ekran kilidi alınamadı"
+                    : "Ekran kilidi desteklenmiyor"}
+              </span>
+            </div>
+
+            {(() => {
+              const acc = accuracyLabel(position?.coords.accuracy);
+              return (
+                <div className="panel px-4 py-3 flex items-center gap-3 text-sm">
+                  <div
+                    className={`w-2.5 h-2.5 rounded-full ${acc.level === "iyi" ? "bg-primary" : acc.level === "zayıf" ? "bg-yellow-500" : "bg-red-500"}`}
+                  />
+                  <span className="font-mono">{acc.text}</span>
+                  {gpsWarn && <span className="ml-auto text-right text-red-400">{gpsWarn}</span>}
+                </div>
+              );
+            })()}
 
             {!peerReady && (
               <div className="text-center text-sm text-muted-foreground">

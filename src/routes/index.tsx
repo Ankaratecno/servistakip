@@ -1,7 +1,8 @@
-import { usePassedStops } from "@/lib/passed-stops";
+import { usePassedStops, useTrimmedRoutePath } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
+import { PEER_OPTIONS, reconnectDelay, type LiveStatus } from "@/lib/peer-config";
 import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
@@ -24,6 +25,8 @@ import type { RadioStatePayload } from "@/lib/radio";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
 import type { DayLog, JourneyPayload } from "@/lib/journey-log";
+
+const MapView = lazy(() => import("@/components/MapView"));
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -148,7 +151,8 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   // Şoförün o sabah yayınladığı aktif güzergâh (atlanan duraklar çıkarılmış)
   const [driverStops, setDriverStops] = useState<Stop[] | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
-  const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "offline">("idle");
+  const [status, setStatus] = useState<LiveStatus>("idle");
+  const [retryCount, setRetryCount] = useState(0);
   const [driver, setDriver] = useState<DriverPayload | null>(null);
   const [eta, setEta] = useState<RouteEtaResult | null>(null);
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
@@ -166,6 +170,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptRef = useRef(0);
 
   const stops = driverStops ?? baseStops;
 
@@ -173,6 +178,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const busPos = driver ? { lat: driver.lat, lng: driver.lng } : null;
   const passedIds = usePassedStops(stops, busPos, null);
   const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
+  const activeRoutePath = useTrimmedRoutePath(routePath, busPos);
 
   useEffect(() => {
     setBaseStops(getStops());
@@ -202,14 +208,18 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   // PeerJS ile şoföre bağlan
   useEffect(() => {
     if (baseStops.length === 0) return;
-    const peer = new Peer({ debug: 1 });
+    const peer = new Peer({ ...PEER_OPTIONS });
     peerRef.current = peer;
 
     const connect = () => {
-      setStatus("connecting");
+      setStatus((s: LiveStatus) => (s === "waiting" ? "waiting" : "connecting"));
       const conn = peer.connect(DRIVER_PEER_ID, { reliable: true });
       connRef.current = conn;
-      conn.on("open", () => setStatus("connected"));
+      conn.on("open", () => {
+        attemptRef.current = 0;
+        setRetryCount(0);
+        setStatus("connected");
+      });
       conn.on("data", (data) => {
         const p = data as
           | DriverPayload
@@ -249,9 +259,11 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
     const scheduleReconnect = () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      const attempt = attemptRef.current++;
+      setRetryCount(attempt + 1);
       reconnectTimerRef.current = setTimeout(() => {
         if (peerRef.current && !peerRef.current.destroyed) connect();
-      }, 4000);
+      }, reconnectDelay(attempt));
     };
 
     peer.on("open", connect);
@@ -275,14 +287,15 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     });
 
     peer.on("error", (err) => {
-      // Şoför henüz online değilse peer-unavailable hatası gelir
-      if (String(err?.type) === "peer-unavailable") {
-        setStatus("offline");
-        scheduleReconnect();
-      }
+      // Bulgu 7: şoför hiç yayında değilse "peer-unavailable" gelir → "yayın yok".
+      // Diğer hatalar gerçek bağlantı sorunudur → "çevrimdışı".
+      if (String(err?.type) === "peer-unavailable") setStatus("waiting");
+      else setStatus("offline");
+      scheduleReconnect();
     });
 
     return () => {
+      attemptRef.current = 0;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       connRef.current?.close();
       peer.destroy();
@@ -385,7 +398,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   const takipTab = (
     <div className="flex flex-col gap-4">
-      <StatusBadge status={status} />
+      <StatusBadge status={status} retry={retryCount} />
 
       <div className="panel p-5">
         <div className="hud-label mb-3">Durağınız</div>
@@ -409,7 +422,11 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         {status !== "connected" ? (
           <div>
             <div className="text-3xl font-bold text-muted-foreground">
-              {status === "offline" || status === "idle" ? "Servis Çevrimdışı" : "Bağlanıyor..."}
+              {status === "waiting" || status === "idle"
+                ? "Şoför Yayında Değil"
+                : status === "offline"
+                  ? "Bağlantı Koptu"
+                  : "Bağlanıyor..."}
             </div>
             <p className="text-sm text-muted-foreground mt-2">
               Şoför sistemi başlattığında otomatik bağlanılacak.
@@ -704,12 +721,25 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   );
 
   const haritaTab = (
-    <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-center px-4">
-      <div className="text-5xl">🚧</div>
-      <div className="text-2xl font-bold text-foreground">3D yapımı devam ediyor</div>
-      <p className="text-sm text-muted-foreground max-w-xs">
-        Harita altyapısı hazırlanıyor. Çok yakında burada interaktif 3D harita olacak.
-      </p>
+    <div className="space-y-3">
+      <div className="panel overflow-hidden h-[70vh] min-h-[420px]">
+        <ClientOnly fallback={null}>
+          <Suspense fallback={null}>
+            <MapView
+              stops={activeStops}
+              selectedStopId={selectedStopId}
+              busPosition={busPos}
+              routePath={activeRoutePath}
+              className="h-full"
+            />
+          </Suspense>
+        </ClientOnly>
+      </div>
+      {!busPos && (
+        <p className="text-xs text-muted-foreground text-center">
+          Şoför yayına başladığında araç haritada canlı görünecek.
+        </p>
+      )}
     </div>
   );
 
@@ -897,18 +927,23 @@ function Header({ right }: { right?: React.ReactNode }) {
   );
 }
 
-function StatusBadge({ status }: { status: "idle" | "connecting" | "connected" | "offline" }) {
-  const map = {
+function StatusBadge({ status, retry = 0 }: { status: LiveStatus; retry?: number }) {
+  const map: Record<LiveStatus, { text: string; color: string; dot: string }> = {
     idle: { text: "Bekliyor", color: "bg-muted", dot: "bg-muted-foreground" },
     connecting: { text: "Bağlanıyor", color: "bg-secondary", dot: "bg-yellow-500 animate-pulse" },
     connected: { text: "Canlı", color: "bg-primary/20", dot: "bg-primary animate-pulse" },
-    offline: { text: "Servis Çevrimdışı", color: "bg-muted", dot: "bg-red-500" },
-  }[status];
+    waiting: { text: "Şoför Yayında Değil", color: "bg-muted", dot: "bg-muted-foreground" },
+    offline: { text: "Bağlantı Koptu", color: "bg-muted", dot: "bg-red-500" },
+  };
+  const s = map[status];
   return (
-    <div className={`panel px-4 py-3 flex items-center gap-3 ${map.color}`}>
-      <div className={`w-2.5 h-2.5 rounded-full ${map.dot}`} />
+    <div className={`panel px-4 py-3 flex items-center gap-3 ${s.color}`}>
+      <div className={`w-2.5 h-2.5 rounded-full ${s.dot}`} />
       <div className="flex flex-col leading-tight">
-        <span className="text-sm font-semibold uppercase tracking-wider">{map.text}</span>
+        <span className="text-sm font-semibold uppercase tracking-wider">
+          {s.text}
+          {status !== "connected" && retry > 0 ? ` · yeniden deneme ${retry}` : ""}
+        </span>
         <span className="text-[11px] font-mono text-muted-foreground">
           {SERVICE_INFO.plate} · {SERVICE_INFO.driverName}
         </span>

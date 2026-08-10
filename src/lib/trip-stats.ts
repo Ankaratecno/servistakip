@@ -61,6 +61,8 @@ export async function resetStats(): Promise<TripStats> {
 }
 
 export function avgSpeedKmh(stats: TripStats): number {
+  // Bulgu 11: movingSeconds artık yalnızca fiilî hareket süresini içerir (duruşlar hariç),
+  // böylece ortalama hız kırmızı ışıkta/molada aşağı çekilmez.
   if (stats.movingSeconds < 15) return 0;
   const v = stats.totalMeters / 1000 / (stats.movingSeconds / 3600);
   if (!isFinite(v) || v < 0) return 0;
@@ -71,11 +73,20 @@ export function avgSpeedKmh(stats: TripStats): number {
 // Amaç: durakta beklerken km artmasın, GPS zıplaması "91 km/s" gibi sahte
 // zirveler üretmesin. Tüm eşikler servis aracı (şehir içi) için ayarlı.
 export const MAX_PLAUSIBLE_KMH = 160;
-const MAX_ACCURACY_M = 30; // bundan kötü fix tamamen atılır
+// Bulgu 8: 30 m katı eşik şehir içi kötü sinyalde sayacı tamamen donduruyordu.
+// İki kademeli eşik: 35 m'ye kadar normal, 90 m'ye kadar "zayıf fix" (daha yüksek
+// gürültü tabanı + mesafe yazılır ama zirve hız güncellenmez), üstü atılır.
+const GOOD_ACCURACY_M = 35;
+const MAX_ACCURACY_M = 90;
 const MAX_ACCEL_KMH_PER_S = 8; // gerçek araç ivmesi sınırı
 const MIN_DT = 1; // saniye
-const MAX_DT = 600; // saniye (kırmızı ışık / mola: 10 dk'ya kadar tolerans)
+// Bulgu 9: arka plandan dönüşte tek adımda büyük km sıçramasını önlemek için
+// 90 sn'den uzun boşluklarda mesafe yazılmaz, sadece hız/konum tazelenir.
+const GAP_DT = 90; // saniye
+const MAX_DT = 600; // saniye (bu üzeri tam sıfırlama)
 const SPEED_SMOOTHING = 0.45; // EMA katsayısı (daha hızlı tepki)
+// Bulgu 10: bu hızın altı "duruş" sayılır (GPS hayalet hızı temizlenir)
+const IDLE_KMH = 3;
 
 export interface FixInput {
   lat: number;
@@ -114,10 +125,11 @@ function haversine(a: { lat: number; lng: number }, b: { lat: number; lng: numbe
 }
 
 export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): FixResult {
-  // 1) Doğruluğu kötü fixleri hiç kullanma
+  // 1) Doğruluğu tamamen kullanılamaz fixleri at (bulgu 8: eşik 30 → 90 m, kademeli)
   if (!isFinite(fix.accuracy) || fix.accuracy > MAX_ACCURACY_M) {
     return { stats, speedKmh: state.smoothedKmh, accepted: false };
   }
+  const weakFix = fix.accuracy > GOOD_ACCURACY_M;
 
   const prev = state.lastFix;
   if (!prev) {
@@ -129,24 +141,26 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   if (dt < MIN_DT) {
     return { stats, speedKmh: state.smoothedKmh, accepted: false };
   }
-  if (dt > MAX_DT) {
-    // Uzun bekleme sonrası: state'i tazele, GPS kendi hızını veriyorsa onu göster
+  if (dt > GAP_DT) {
+    // Bulgu 9: uzun boşluk (arka plan / sinyal kaybı) → mesafe yazma, sadece tazele.
     state.lastFix = fix;
     state.fastStreak = 0;
     const gpsNow =
       fix.gpsSpeedKmh != null && isFinite(fix.gpsSpeedKmh)
         ? Math.min(Math.max(0, fix.gpsSpeedKmh), MAX_PLAUSIBLE_KMH)
         : 0;
-    state.smoothedKmh = gpsNow;
-    return { stats, speedKmh: gpsNow, accepted: false };
+    state.smoothedKmh = gpsNow < IDLE_KMH ? 0 : gpsNow;
+    return { stats, speedKmh: state.smoothedKmh, accepted: false };
   }
 
   const dm = haversine(prev, fix);
   // 2) Konum belirsizliğinden küçük hareketler = gürültü (durakta bekleme)
-  const noiseFloor = Math.max(4, (fix.accuracy + prev.accuracy) * 0.4);
+  const noiseFloor = Math.max(4, (fix.accuracy + prev.accuracy) * (weakFix ? 0.6 : 0.4));
   if (dm < noiseFloor) {
     state.lastFix = fix;
     state.smoothedKmh = state.smoothedKmh * (1 - SPEED_SMOOTHING);
+    // Bulgu 10: duruşta hayalet hızı tam sıfıra indir
+    if (state.smoothedKmh < IDLE_KMH) state.smoothedKmh = 0;
     state.fastStreak = 0;
     return { stats, speedKmh: state.smoothedKmh, accepted: false };
   }
@@ -170,14 +184,21 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   state.smoothedKmh = state.smoothedKmh
     ? state.smoothedKmh + (measured - state.smoothedKmh) * SPEED_SMOOTHING
     : measured;
+  if (state.smoothedKmh < IDLE_KMH) state.smoothedKmh = 0;
 
-  // 5) Zirve hız sadece üst üste 3 doğrulanmış fix sonrası güncellenir
+  // 5) Zirve hız: iyi fix'te 2 doğrulanmış ölçüm yeter; GPS kendi hızıyla
+  //    teyit ediyorsa (bulgu 12) tek ölçümde de zirve güncellenir. Zayıf fix'te güncellenmez.
   state.fastStreak = measured > stats.maxSpeedKmh ? state.fastStreak + 1 : 0;
-  const nextMax = state.fastStreak >= 3 ? Math.min(measured, MAX_PLAUSIBLE_KMH) : stats.maxSpeedKmh;
+  const gpsConfirms = gps != null && Math.abs(gps - segKmh) < 8;
+  const peakOk = !weakFix && (state.fastStreak >= 2 || (gpsConfirms && state.fastStreak >= 1));
+  const nextMax = peakOk ? Math.min(measured, MAX_PLAUSIBLE_KMH) : stats.maxSpeedKmh;
+
+  // Bulgu 11: yalnızca fiilî hareket süresi sayılır
+  const movingDelta = measured >= IDLE_KMH ? dt : 0;
 
   const next: TripStats = {
     totalMeters: stats.totalMeters + dm,
-    movingSeconds: stats.movingSeconds + dt,
+    movingSeconds: stats.movingSeconds + movingDelta,
     maxSpeedKmh: Math.max(stats.maxSpeedKmh, nextMax),
     startedAt: stats.startedAt || fix.ts,
     updatedAt: fix.ts,
@@ -185,3 +206,17 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   state.lastFix = fix;
   return { stats: next, speedKmh: state.smoothedKmh, accepted: true };
 }
+
+/** Bulgu 13: GPS doğruluğunu kullanıcıya anlatan kısa etiket. */
+export function accuracyLabel(accuracy: number | null | undefined): {
+  text: string;
+  level: "iyi" | "zayıf" | "kötü";
+} {
+  if (accuracy == null || !isFinite(accuracy)) return { text: "GPS bekleniyor", level: "kötü" };
+  if (accuracy <= GOOD_ACCURACY_M) return { text: `GPS ±${Math.round(accuracy)} m`, level: "iyi" };
+  if (accuracy <= MAX_ACCURACY_M)
+    return { text: `GPS zayıf ±${Math.round(accuracy)} m`, level: "zayıf" };
+  return { text: `GPS sinyali kötü ±${Math.round(accuracy)} m`, level: "kötü" };
+}
+
+export { GOOD_ACCURACY_M, MAX_ACCURACY_M, MAX_DT, IDLE_KMH };

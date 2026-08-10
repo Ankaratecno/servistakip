@@ -2,14 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
-import {
-  hourAnnouncementText,
-  loadVoiceBuffer,
-  playJingle,
-  randomJingleLine,
-} from "@/lib/jingle";
+import { hourAnnouncementText, loadVoiceBuffer, playJingle, randomJingleLine } from "@/lib/jingle";
 import { synthAnnouncement } from "@/lib/tts.functions";
-
 
 interface Track {
   name: string;
@@ -187,7 +181,6 @@ export default function DriverRadio({
   afterTrackRef.current = afterTrack;
 
   const playStationId = () => void runJingle(randomJingleLine(), false, "🎙 ELEKTRO RADYO");
-
 
   const playHourAnnouncement = async () => {
     ensureGraph();

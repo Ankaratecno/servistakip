@@ -21,7 +21,9 @@ export default function WeatherCard({ position, subtitle }: Props) {
     const { lat, lng } = position;
     const last = lastRef.current;
     const moved =
-      !last || Math.abs(last.lat - lat) > MOVE_THRESHOLD || Math.abs(last.lng - lng) > MOVE_THRESHOLD;
+      !last ||
+      Math.abs(last.lat - lat) > MOVE_THRESHOLD ||
+      Math.abs(last.lng - lng) > MOVE_THRESHOLD;
     const stale = !last || Date.now() - last.ts > REFRESH_MS;
     if (!moved && !stale) return;
 

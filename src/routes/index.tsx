@@ -7,11 +7,7 @@ import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
 import { getRoute, getRouteEta, formatEta, type RouteEtaResult } from "@/lib/routing";
 import { blobToBase64, pickRecorderMime, speak, type VoiceAlertPayload } from "@/lib/voice-alert";
-import {
-  announceText,
-  type BrakeEventPayload,
-  type StopAnnouncePayload,
-} from "@/lib/announce";
+import { announceText, type BrakeEventPayload, type StopAnnouncePayload } from "@/lib/announce";
 import {
   alarmTone,
   ensureNotificationPermission,
@@ -183,7 +179,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     () => trimRoutePath(routePath, busPos),
     [routePath, busPos?.lat, busPos?.lng],
   );
-
 
   useEffect(() => {
     setBaseStops(getStops());
@@ -365,7 +360,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       notify("Servis geliyor!", `${selectedStop.name} durağına 200 metre kaldı.`);
     }
   }, [eta?.distanceM, selectedStop?.id, alertOn]);
-
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -552,9 +546,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             )}
           </div>
 
-
-
-
           <div className="panel p-5">
             <div className="hud-label mb-3">Durağınız</div>
             <select
@@ -678,7 +669,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
               selectedStopId={selectedStopId}
               busPosition={busPos}
               routePath={activeRoutePath}
-
               className="h-full"
             />
           </Suspense>

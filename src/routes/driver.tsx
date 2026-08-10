@@ -179,7 +179,6 @@ function DriverApp() {
   const announceStateRef = useRef(initialAnnounceState());
   const brakePrevRef = useRef<{ kmh: number; ts: number } | null>(null);
 
-
   const statsRef = useRef<TripStats>(EMPTY_STATS);
   const filterRef = useRef<FilterState>(initialFilterState());
   const lastSaveRef = useRef<number>(0);
@@ -214,7 +213,10 @@ function DriverApp() {
     : null;
   const passedIds = usePassedStops(stops, busPos, position?.coords.accuracy ?? null);
   const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
-  const activeRoutePath = useMemo(() => trimRoutePath(routePath, busPos), [routePath, busPos?.lat, busPos?.lng]);
+  const activeRoutePath = useMemo(
+    () => trimRoutePath(routePath, busPos),
+    [routePath, busPos?.lat, busPos?.lng],
+  );
 
   // 15. madde: son geçilen durak kaydı + kopma sonrası devam
   const [resume, setResume] = useState<ResumePoint | null>(null);
@@ -256,8 +258,6 @@ function DriverApp() {
     setResumeHandled(true);
     void clearResume();
   };
-
-
 
   const routePayload = () => ({ type: "route" as const, stops: stopsRef.current, ts: Date.now() });
 
@@ -305,8 +305,6 @@ function DriverApp() {
     setBrakes((prev) => [payload, ...prev].slice(0, 20));
     broadcastEvent(payload);
   };
-
-
 
   // --- 7. madde: günlük hareket kaydı (IndexedDB) ---
   const applyDay = (fn: (d: DayLog) => DayLog) => {
@@ -366,7 +364,6 @@ function DriverApp() {
     return () => battery?.removeEventListener("chargingchange", onChange);
   }, []);
 
-
   useEffect(() => {
     if (stops.length >= 2) getRoute(stops).then((r) => r && setRoutePath(r.path));
     if (running) broadcastRoute();
@@ -405,7 +402,6 @@ function DriverApp() {
       runningRef.current = true;
       applyDay((d) => openSession(d));
     });
-
 
     peer.on("connection", (conn) => {
       connectionsRef.current.add(conn);
@@ -481,7 +477,6 @@ function DriverApp() {
       setError(`Bağlantı hatası: ${err.message}`);
       stopInternal();
     });
-
 
     // Konum takibi
     watchIdRef.current = navigator.geolocation.watchPosition(
@@ -631,8 +626,6 @@ function DriverApp() {
     };
   }, [running]);
 
-
-
   // Sekme kapanırken/arka plana atılırken yayın kimliğini sunucuda serbest bırak
   useEffect(() => {
     const release = () => {
@@ -653,7 +646,6 @@ function DriverApp() {
       window.removeEventListener("beforeunload", release);
     };
   }, []);
-
 
   const speedKmh = liveSpeed;
 
@@ -722,7 +714,6 @@ function DriverApp() {
             )}
 
             <div className="mt-6">
-
               <StopPlanner
                 realStops={realStops}
                 startStopId={startStopId}
@@ -758,10 +749,7 @@ function DriverApp() {
                 <strong>otomatik başlat</strong>
               </span>
             </label>
-            <Link
-              to="/rapor"
-              className="hud-label block mt-4 text-center hover:text-primary"
-            >
+            <Link to="/rapor" className="hud-label block mt-4 text-center hover:text-primary">
               → Haftalık Sürüş Raporu
             </Link>
             <p className="text-xs text-muted-foreground mt-4 leading-relaxed">
@@ -820,9 +808,7 @@ function DriverApp() {
 
             <WeatherCard
               position={
-                position
-                  ? { lat: position.coords.latitude, lng: position.coords.longitude }
-                  : null
+                position ? { lat: position.coords.latitude, lng: position.coords.longitude } : null
               }
             />
 
@@ -900,7 +886,8 @@ function DriverApp() {
                 </div>
                 {lastAnnounce && (
                   <div className="text-[11px] font-mono text-muted-foreground mt-1">
-                    {new Date(lastAnnounce.ts).toLocaleTimeString("tr-TR")} · {lastAnnounce.distanceM} m
+                    {new Date(lastAnnounce.ts).toLocaleTimeString("tr-TR")} ·{" "}
+                    {lastAnnounce.distanceM} m
                   </div>
                 )}
               </div>
@@ -942,8 +929,6 @@ function DriverApp() {
                 </div>
               )}
             </div>
-
-
 
             <Suspense fallback={null}>
               <DriverRadio
@@ -1018,7 +1003,6 @@ function DriverApp() {
                   stops={activeStops}
                   busPosition={busPos}
                   routePath={activeRoutePath}
-
                   className="h-full min-h-[400px]"
                 />
               </Suspense>

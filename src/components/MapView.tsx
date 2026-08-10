@@ -29,21 +29,18 @@ function busEl() {
   return el;
 }
 
-function bearingBetween(
-  a: { lat: number; lng: number },
-  b: { lat: number; lng: number },
-): number {
+function bearingBetween(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   const toRad = (d: number) => (d * Math.PI) / 180;
   const y = Math.sin(toRad(b.lng - a.lng)) * Math.cos(toRad(b.lat));
   const x =
     Math.cos(toRad(a.lat)) * Math.sin(toRad(b.lat)) -
     Math.sin(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.cos(toRad(b.lng - a.lng));
-  return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
 // Açı farkını en kısa yoldan yumuşat
 function smoothBearing(prev: number, next: number, factor = 0.35): number {
-  let diff = ((next - prev + 540) % 360) - 180;
+  const diff = ((next - prev + 540) % 360) - 180;
   return (prev + diff * factor + 360) % 360;
 }
 
@@ -155,7 +152,11 @@ export default function MapView({
       // Rota katmanları
       map.addSource("acrob-route", {
         type: "geojson",
-        data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [] } },
+        data: {
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates: [] },
+        },
       });
       map.addLayer({
         id: "acrob-route-casing",
@@ -188,7 +189,9 @@ export default function MapView({
       setReady(true);
     });
 
-    map.on("click", (e: maplibregl.MapMouseEvent) => clickRef.current?.(e.lngLat.lat, e.lngLat.lng));
+    map.on("click", (e: maplibregl.MapMouseEvent) =>
+      clickRef.current?.(e.lngLat.lat, e.lngLat.lng),
+    );
     // Kullanıcı haritayı elle sürüklerse takibi bırak
     map.on("dragstart", () => setFollow(false));
     mapRef.current = map;
@@ -255,7 +258,6 @@ export default function MapView({
     src?.setData({ type: "FeatureCollection", features: wp } as never);
   }, [stops, selectedStopId, ready]);
 
-
   // Görünümü yalnızca durak listesi değiştiğinde bir kez sığdır
   const fitKeyRef = useRef("");
   useEffect(() => {
@@ -285,7 +287,10 @@ export default function MapView({
     // Yön: önce gerçek hareketten, yoksa rota üzerindeki en yakın segmentten
     const prev = lastPosRef.current;
     let target = headingRef.current;
-    if (prev && (Math.abs(prev.lat - busPosition.lat) > 1e-6 || Math.abs(prev.lng - busPosition.lng) > 1e-6)) {
+    if (
+      prev &&
+      (Math.abs(prev.lat - busPosition.lat) > 1e-6 || Math.abs(prev.lng - busPosition.lng) > 1e-6)
+    ) {
       target = bearingBetween(prev, busPosition);
     } else if (routePath && routePath.length > 1) {
       let bi = 0;

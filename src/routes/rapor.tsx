@@ -132,8 +132,8 @@ function ReportPage() {
                     >
                       <span className="font-semibold truncate mr-2">{s.name}</span>
                       <span className="font-mono text-muted-foreground">
-                        ORT. {clockOfSeconds(s.medianSeconds)} · ±
-                        {fmtDuration(s.deviationSeconds)} · {s.samples} gün
+                        ORT. {clockOfSeconds(s.medianSeconds)} · ±{fmtDuration(s.deviationSeconds)}{" "}
+                        · {s.samples} gün
                       </span>
                       <span className="font-mono font-bold text-primary ml-2">
                         {s.samples >= 2 ? s.score : "—"}

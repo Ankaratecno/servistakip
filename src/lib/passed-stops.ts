@@ -120,7 +120,14 @@ export function usePassedStops(
     if (!pos) return;
     let changed = false;
     for (const s of stops) {
-      if (ingestStopPass(stateRef.current, s.id, distanceM(pos, { lat: s.lat, lng: s.lng }), accuracyM)) {
+      if (
+        ingestStopPass(
+          stateRef.current,
+          s.id,
+          distanceM(pos, { lat: s.lat, lng: s.lng }),
+          accuracyM,
+        )
+      ) {
         changed = true;
       }
     }

@@ -39,7 +39,6 @@ export async function loadBuffer(ctx: AudioContext, url: string): Promise<AudioB
   return buf;
 }
 
-
 function noiseBuffer(ctx: AudioContext, seconds: number) {
   const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * seconds), ctx.sampleRate);
   const data = buf.getChannelData(0);
@@ -171,7 +170,6 @@ export function playJingle(ctx: AudioContext, out: AudioNode, opts: JingleOption
 export function randomJingleLine(): string {
   return JINGLE_LINES[Math.floor(Math.random() * JINGLE_LINES.length)]!;
 }
-
 
 export function hourAnnouncementText(d = new Date()): string {
   const hh = String(d.getHours()).padStart(2, "0");

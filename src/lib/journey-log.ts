@@ -69,7 +69,9 @@ export async function loadDay(date = todayKey()): Promise<DayLog> {
 export async function saveDay(day: DayLog): Promise<void> {
   try {
     const db = await openDb();
-    db.transaction(STORE, "readwrite").objectStore(STORE).put({ ...day, updatedAt: Date.now() });
+    db.transaction(STORE, "readwrite")
+      .objectStore(STORE)
+      .put({ ...day, updatedAt: Date.now() });
   } catch {
     /* ignore */
   }
@@ -240,7 +242,7 @@ export interface PunctualityReport {
 function median(list: number[]): number {
   const s = [...list].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m]! : ((s[m - 1]! + s[m]!) / 2);
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 }
 
 /**

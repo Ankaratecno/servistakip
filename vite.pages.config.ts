@@ -19,6 +19,12 @@ export default defineConfig({
         find: /.*\/routes\/__root(\.tsx)?$/,
         replacement: path.resolve(process.cwd(), "pages/root-spa.tsx"),
       },
+      // Sunucu fonksiyonu statik build'de yok; @tanstack/react-start'ın sunucu
+      // kodu (node:async_hooks / AsyncLocalStorage) tarayıcıda patlıyor.
+      {
+        find: /.*\/lib\/tts\.functions(\.ts)?$/,
+        replacement: path.resolve(process.cwd(), "pages/tts-stub.ts"),
+      },
       { find: "@", replacement: path.resolve(process.cwd(), "src") },
     ],
   },

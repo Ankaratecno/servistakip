@@ -9,10 +9,16 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as RaporRouteImport } from './routes/rapor'
 import { Route as DriverRouteImport } from './routes/driver'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
 
+const RaporRoute = RaporRouteImport.update({
+  id: '/rapor',
+  path: '/rapor',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DriverRoute = DriverRouteImport.update({
   id: '/driver',
   path: '/driver',
@@ -33,34 +39,45 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/driver': typeof DriverRoute
+  '/rapor': typeof RaporRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/driver': typeof DriverRoute
+  '/rapor': typeof RaporRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/driver': typeof DriverRoute
+  '/rapor': typeof RaporRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/admin' | '/driver'
+  fullPaths: '/' | '/admin' | '/driver' | '/rapor'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/driver'
-  id: '__root__' | '/' | '/admin' | '/driver'
+  to: '/' | '/admin' | '/driver' | '/rapor'
+  id: '__root__' | '/' | '/admin' | '/driver' | '/rapor'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   DriverRoute: typeof DriverRoute
+  RaporRoute: typeof RaporRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/rapor': {
+      id: '/rapor'
+      path: '/rapor'
+      fullPath: '/rapor'
+      preLoaderRoute: typeof RaporRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/driver': {
       id: '/driver'
       path: '/driver'
@@ -89,7 +106,18 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   DriverRoute: DriverRoute,
+  RaporRoute: RaporRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}

@@ -1,3 +1,5 @@
+import { loadResume, saveResume, clearResume, type ResumePoint } from "@/lib/resume";
+import { usePassedStops, trimRoutePath } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
@@ -7,6 +9,34 @@ import { DRIVER_SESSION_KEY, checkDriverPassword } from "@/lib/driver-auth";
 import { getStops, type Stop } from "@/lib/stops";
 import { getRoute } from "@/lib/routing";
 import { beep, playBase64Audio, speak, type VoiceAlertPayload } from "@/lib/voice-alert";
+import type { RadioStatePayload } from "@/lib/radio";
+import {
+  announceText,
+  brakeLevel,
+  ensureMotionPermission,
+  gpsBrakeG,
+  ingestStopDistance,
+  initialAnnounceState,
+  startBrakeWatch,
+  type BrakeEventPayload,
+  type StopAnnouncePayload,
+} from "@/lib/announce";
+import DataSheet from "@/components/DataSheet";
+import WeatherCard from "@/components/WeatherCard";
+import {
+  ARRIVAL_RADIUS_M,
+  addDriving,
+  closeSession,
+  clearDay,
+  distanceM,
+  loadDay,
+  openSession,
+  recordArrival,
+  saveDay,
+  todayKey,
+  type DayLog,
+  type JourneyPayload,
+} from "@/lib/journey-log";
 
 import {
   avgSpeedKmh,
@@ -21,6 +51,7 @@ import {
 } from "@/lib/trip-stats";
 
 const MapView = lazy(() => import("@/components/MapView"));
+const DriverRadio = lazy(() => import("@/components/DriverRadio"));
 
 export const Route = createFileRoute("/driver")({
   head: () => ({
@@ -121,6 +152,33 @@ function DriverApp() {
   const [stats, setStats] = useState<TripStats>(EMPTY_STATS);
   const [liveSpeed, setLiveSpeed] = useState(0);
   const [alerts, setAlerts] = useState<VoiceAlertPayload[]>([]);
+  const [day, setDay] = useState<DayLog | null>(null);
+  const dayRef = useRef<DayLog | null>(null);
+  const lastIdleTsRef = useRef<number>(0);
+  const [autoStart, setAutoStart] = useState(
+    () => localStorage.getItem("acrob-auto-start") !== "0",
+  );
+  const autoStartRef = useRef(autoStart);
+  autoStartRef.current = autoStart;
+  const runningRef = useRef(false);
+  const prevChargingRef = useRef<boolean | null>(null);
+  const idRetryRef = useRef(0);
+  const startRef = useRef<() => void>(() => undefined);
+
+  // --- 10. madde: otomatik durak anonsu + ani fren algılama ---
+  const [announceOn, setAnnounceOn] = useState(
+    () => localStorage.getItem("acrob-stop-announce") !== "0",
+  );
+  const announceOnRef = useRef(announceOn);
+  announceOnRef.current = announceOn;
+  const [lastAnnounce, setLastAnnounce] = useState<StopAnnouncePayload | null>(null);
+  const [brakes, setBrakes] = useState<BrakeEventPayload[]>([]);
+  const [motionReady, setMotionReady] = useState(false);
+  const motionReadyRef = useRef(false);
+  motionReadyRef.current = motionReady;
+  const announceStateRef = useRef(initialAnnounceState());
+  const brakePrevRef = useRef<{ kmh: number; ts: number } | null>(null);
+
 
   const statsRef = useRef<TripStats>(EMPTY_STATS);
   const filterRef = useRef<FilterState>(initialFilterState());
@@ -129,6 +187,7 @@ function DriverApp() {
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<Set<DataConnection>>(new Set());
   const watchIdRef = useRef<number | null>(null);
+  const radioStreamRef = useRef<MediaStream | null>(null);
 
   // Rota noktaları dahil tüm liste (şoför her noktayı başlangıç seçebilir / atlayabilir)
   const realStops = allStops;
@@ -149,6 +208,57 @@ function DriverApp() {
   const stopsRef = useRef<Stop[]>(stops);
   stopsRef.current = stops;
 
+  // 14. madde: tam varış + uzaklaşma ile "geçildi" tespiti
+  const busPos = position
+    ? { lat: position.coords.latitude, lng: position.coords.longitude }
+    : null;
+  const passedIds = usePassedStops(stops, busPos, position?.coords.accuracy ?? null);
+  const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
+  const activeRoutePath = useMemo(() => trimRoutePath(routePath, busPos), [routePath, busPos?.lat, busPos?.lng]);
+
+  // 15. madde: son geçilen durak kaydı + kopma sonrası devam
+  const [resume, setResume] = useState<ResumePoint | null>(null);
+  const [resumeHandled, setResumeHandled] = useState(false);
+
+  useEffect(() => {
+    void loadResume().then(setResume);
+  }, []);
+
+  // Geçilen duraklar arasından listedeki en ileri olanı kaydet
+  useEffect(() => {
+    if (passedIds.size === 0) return;
+    let lastIdx = -1;
+    allStops.forEach((s, i) => {
+      if (passedIds.has(s.id) && i > lastIdx) lastIdx = i;
+    });
+    const lastStop = lastIdx >= 0 ? allStops[lastIdx] : null;
+    if (!lastStop) return;
+    const point: ResumePoint = {
+      stopId: lastStop.id,
+      stopName: lastStop.name,
+      index: lastIdx,
+      ts: Date.now(),
+    };
+    setResume(point);
+    void saveResume(point);
+  }, [passedIds, allStops]);
+
+  const continueFromResume = () => {
+    if (!resume) return;
+    const next = allStops[resume.index + 1] ?? allStops[resume.index];
+    if (next) setStartStopId(next.id);
+    setResumeHandled(true);
+  };
+
+  const restartFromBeginning = () => {
+    if (allStops[0]) setStartStopId(allStops[0].id);
+    setResume(null);
+    setResumeHandled(true);
+    void clearResume();
+  };
+
+
+
   const routePayload = () => ({ type: "route" as const, stops: stopsRef.current, ts: Date.now() });
 
   const broadcastRoute = () => {
@@ -161,6 +271,101 @@ function DriverApp() {
       }
     });
   };
+
+  const broadcastRadio = (payload: RadioStatePayload) => {
+    connectionsRef.current.forEach((c) => {
+      try {
+        if (c.open) c.send(payload);
+      } catch {
+        /* ignore */
+      }
+    });
+  };
+
+  // Durak anonsu / ani fren paketlerini tüm yolculara gönder
+  const broadcastEvent = (payload: StopAnnouncePayload | BrakeEventPayload) => {
+    connectionsRef.current.forEach((c) => {
+      try {
+        if (c.open) c.send(payload);
+      } catch {
+        /* ignore */
+      }
+    });
+  };
+
+  const registerBrake = (g: number, source: "sensör" | "gps") => {
+    const payload: BrakeEventPayload = {
+      type: "brake",
+      g,
+      level: brakeLevel(g),
+      speedKmh: Math.round(filterRef.current.smoothedKmh),
+      source,
+      ts: Date.now(),
+    };
+    setBrakes((prev) => [payload, ...prev].slice(0, 20));
+    broadcastEvent(payload);
+  };
+
+
+
+  // --- 7. madde: günlük hareket kaydı (IndexedDB) ---
+  const applyDay = (fn: (d: DayLog) => DayLog) => {
+    const cur = dayRef.current;
+    if (!cur) return;
+    const next = fn(cur);
+    if (next === cur) return;
+    dayRef.current = next;
+    setDay(next);
+    void saveDay(next);
+    const payload: JourneyPayload = { type: "journey", day: next, ts: Date.now() };
+    connectionsRef.current.forEach((c) => {
+      try {
+        if (c.open) c.send(payload);
+      } catch {
+        /* ignore */
+      }
+    });
+  };
+
+  useEffect(() => {
+    void loadDay(todayKey()).then((d) => {
+      dayRef.current = d;
+      setDay(d);
+    });
+  }, []);
+
+  // Kontak hack'i: şarj başladı = kontak açık, kesildi = duruş
+  // NOT: gün kaydı (hareket saatleri) her durumda işlenir; yayın ise SADECE
+  // gerçek bir "şarj yok -> şarj var" geçişinde otomatik başlar. Sayfa açılışında
+  // zaten şarjdaysa otomatik başlamaz; böylece açık kalan başka bir sekme/cihaz
+  // sabit yayın kimliğini kendiliğinden kapmaz.
+  useEffect(() => {
+    let battery: (EventTarget & { charging: boolean }) | null = null;
+    const onChange = () => {
+      if (!battery) return;
+      const charging = battery.charging;
+      applyDay((d) => (charging ? openSession(d) : closeSession(d)));
+      const prev = prevChargingRef.current;
+      prevChargingRef.current = charging;
+      if (prev === null) return; // ilk okuma: otomatik başlatma yok
+      if (charging && !prev && autoStartRef.current && !runningRef.current) {
+        startRef.current();
+      }
+    };
+    const nav = navigator as Navigator & {
+      getBattery?: () => Promise<EventTarget & { charging: boolean }>;
+    };
+    nav
+      .getBattery?.()
+      .then((b) => {
+        battery = b;
+        b.addEventListener("chargingchange", onChange);
+        onChange();
+      })
+      .catch(() => undefined);
+    return () => battery?.removeEventListener("chargingchange", onChange);
+  }, []);
+
 
   useEffect(() => {
     if (stops.length >= 2) getRoute(stops).then((r) => r && setRoutePath(r.path));
@@ -177,6 +382,7 @@ function DriverApp() {
 
   const start = () => {
     setError(null);
+    if (runningRef.current) return;
     // Plaka doğrulama (boşluk ve büyük/küçük harf toleranslı)
     const norm = (s: string) => s.replace(/\s+/g, "").toUpperCase();
     if (norm(plate) !== norm(SERVICE_INFO.plate)) {
@@ -192,9 +398,14 @@ function DriverApp() {
     peerRef.current = peer;
 
     peer.on("open", () => {
+      idRetryRef.current = 0;
+      setError(null);
       setPeerReady(true);
       setRunning(true);
+      runningRef.current = true;
+      applyDay((d) => openSession(d));
     });
+
 
     peer.on("connection", (conn) => {
       connectionsRef.current.add(conn);
@@ -208,6 +419,21 @@ function DriverApp() {
         }
         const p = watchLastRef.current;
         if (p) conn.send(p);
+        if (dayRef.current) {
+          try {
+            conn.send({ type: "journey", day: dayRef.current, ts: Date.now() } as JourneyPayload);
+          } catch {
+            /* ignore */
+          }
+        }
+        // Radyo yayını açıksa yeni yolcuyu da hemen bağla
+        if (radioStreamRef.current) {
+          try {
+            peerRef.current?.call(conn.peer, radioStreamRef.current);
+          } catch {
+            /* ignore */
+          }
+        }
       });
       conn.on("data", (data) => {
         const p = data as VoiceAlertPayload;
@@ -235,12 +461,27 @@ function DriverApp() {
 
     peer.on("error", (err) => {
       if (String(err?.type) === "unavailable-id") {
-        setError("Bu servis şu an başka bir cihazdan yayınlanıyor. Diğer oturumu kapatın.");
-      } else {
-        setError(`Bağlantı hatası: ${err.message}`);
+        // Eski oturum sunucuda hâlâ kayıtlı olabilir (sekme kapansa da ~1-2 dk sürer).
+        // Kısa aralıklarla yeniden dene, kullanıcıyı bekletmeden devral.
+        stopInternal();
+        if (idRetryRef.current < 6) {
+          idRetryRef.current += 1;
+          setError(
+            `Önceki yayın oturumu kapanıyor, kimlik devralınıyor… (${idRetryRef.current}/6)`,
+          );
+          window.setTimeout(() => startRef.current(), 5000);
+        } else {
+          idRetryRef.current = 0;
+          setError(
+            "Bu servis şu an başka bir cihazdan yayınlanıyor. Diğer cihazdaki yayını durdurup tekrar deneyin.",
+          );
+        }
+        return;
       }
+      setError(`Bağlantı hatası: ${err.message}`);
       stopInternal();
     });
+
 
     // Konum takibi
     watchIdRef.current = navigator.geolocation.watchPosition(
@@ -257,7 +498,51 @@ function DriverApp() {
           gpsSpeedKmh: gpsSpeed,
         });
         setLiveSpeed(res.speedKmh);
+        // 10.2 GPS yedeği: ivmeölçer yoksa hız düşüşünden ani fren çıkar
+        const prevSpeed = brakePrevRef.current;
+        if (!motionReadyRef.current && prevSpeed) {
+          const gB = gpsBrakeG(prevSpeed.kmh, res.speedKmh, (now - prevSpeed.ts) / 1000);
+          if (gB > 0) registerBrake(gB, "gps");
+        }
+        brakePrevRef.current = { kmh: res.speedKmh, ts: now };
+        // Kontak API'si olmayan cihazlarda hareket/duruş yedeği
+        if (res.speedKmh > 5) {
+          lastIdleTsRef.current = now;
+          applyDay((d) => openSession(d, now));
+        } else if (now - lastIdleTsRef.current > 180000 && lastIdleTsRef.current > 0) {
+          applyDay((d) => closeSession(d, now));
+        }
+        // Durak varış saatleri (100 m yakınlık, gün içinde tek kayıt)
+        // + 10.1 Otomatik durak anonsu (350 m yakınlık, durak başına bir kez)
+        stopsRef.current
+          .filter((s) => s.kind === "stop")
+          .forEach((s) => {
+            const dm = distanceM(
+              { lat: pos.coords.latitude, lng: pos.coords.longitude },
+              { lat: s.lat, lng: s.lng },
+            );
+            if (dm <= ARRIVAL_RADIUS_M) applyDay((d) => recordArrival(d, s.id, s.name, now));
+            if (ingestStopDistance(announceStateRef.current, s.id, dm)) {
+              const payload: StopAnnouncePayload = {
+                type: "announce",
+                stopId: s.id,
+                stopName: s.name,
+                distanceM: Math.round(dm),
+                ts: Date.now(),
+              };
+              setLastAnnounce(payload);
+              broadcastEvent(payload);
+              if (announceOnRef.current) speak(announceText(s.name));
+            }
+          });
+
         if (res.accepted) {
+          // 8. madde: günlük mesafe ve fiili hareket süresi
+          const dMeters = res.stats.totalMeters - statsRef.current.totalMeters;
+          const dSeconds = res.stats.movingSeconds - statsRef.current.movingSeconds;
+          if (dMeters > 0 && dSeconds > 0 && res.speedKmh > 5) {
+            applyDay((d) => addDriving(d, dMeters, dSeconds));
+          }
           statsRef.current = res.stats;
           setStats(res.stats);
           // Yazmayı seyrekleştir (IndexedDB'yi yormamak için ~5 sn)
@@ -274,6 +559,7 @@ function DriverApp() {
           speedKmh: res.speedKmh,
           avgSpeedKmh: avgSpeedKmh(statsRef.current),
           totalKm: statsRef.current.totalMeters / 1000,
+          maxSpeedKmh: statsRef.current.maxSpeedKmh,
           heading: pos.coords.heading,
           plate: SERVICE_INFO.plate,
           ts: Date.now(),
@@ -299,12 +585,15 @@ function DriverApp() {
     speedKmh: number;
     avgSpeedKmh: number;
     totalKm: number;
+    maxSpeedKmh: number;
     heading: number | null;
     plate: string;
     ts: number;
   } | null>(null);
 
   const stopInternal = () => {
+    runningRef.current = false;
+    applyDay((d) => closeSession(d));
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
@@ -322,6 +611,49 @@ function DriverApp() {
   };
 
   useEffect(() => () => stopInternal(), []);
+  startRef.current = start;
+
+  // 10.2 Ani fren algılama: yayın açıkken ivmeölçeri dinle
+  useEffect(() => {
+    if (!running) return;
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void ensureMotionPermission().then((ok) => {
+      if (cancelled) return;
+      setMotionReady(ok);
+      if (!ok) return;
+      stop = startBrakeWatch((g) => registerBrake(g, "sensör"));
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+      setMotionReady(false);
+    };
+  }, [running]);
+
+
+
+  // Sekme kapanırken/arka plana atılırken yayın kimliğini sunucuda serbest bırak
+  useEffect(() => {
+    const release = () => {
+      if (!runningRef.current && !peerRef.current) return;
+      try {
+        connectionsRef.current.forEach((c) => c.close());
+        peerRef.current?.destroy();
+      } catch {
+        /* ignore */
+      }
+      peerRef.current = null;
+      runningRef.current = false;
+    };
+    window.addEventListener("pagehide", release);
+    window.addEventListener("beforeunload", release);
+    return () => {
+      window.removeEventListener("pagehide", release);
+      window.removeEventListener("beforeunload", release);
+    };
+  }, []);
+
 
   const speedKmh = liveSpeed;
 
@@ -335,7 +667,15 @@ function DriverApp() {
           <div className="flex-1 text-center">
             <h1 className="text-lg font-bold">ŞOFÖR PANELİ</h1>
           </div>
-          <div className="w-20" />
+          <DataSheet
+            day={day}
+            history
+            onReset={async () => {
+              const fresh = await clearDay(todayKey());
+              dayRef.current = fresh;
+              setDay(fresh);
+            }}
+          />
         </div>
       </header>
 
@@ -357,7 +697,32 @@ function DriverApp() {
               className="w-full bg-input border border-border rounded-md px-4 py-4 text-xl font-mono font-bold uppercase text-primary cursor-not-allowed focus:outline-none"
             />
 
+            {resume && !resumeHandled && (
+              <div className="mt-6 rounded-md border border-primary/40 bg-primary/10 p-4">
+                <div className="hud-label mb-1">Yarım Kalan Sefer</div>
+                <p className="text-sm">
+                  Son geçilen durak: <strong>{resume.stopName}</strong> ·{" "}
+                  {new Date(resume.ts).toLocaleTimeString("tr-TR")}
+                </p>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <button
+                    onClick={continueFromResume}
+                    className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90"
+                  >
+                    Kaldığım yerden devam et
+                  </button>
+                  <button
+                    onClick={restartFromBeginning}
+                    className="px-4 py-2 rounded-md border border-border text-sm font-semibold hover:bg-muted"
+                  >
+                    Baştan başla
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="mt-6">
+
               <StopPlanner
                 realStops={realStops}
                 startStopId={startStopId}
@@ -378,6 +743,27 @@ function DriverApp() {
             >
               YAYINI BAŞLAT
             </button>
+            <label className="mt-4 flex items-center gap-3 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoStart}
+                onChange={(e) => {
+                  setAutoStart(e.target.checked);
+                  localStorage.setItem("acrob-auto-start", e.target.checked ? "1" : "0");
+                }}
+                className="w-4 h-4 accent-primary"
+              />
+              <span>
+                Araç kontağı açılınca (telefon şarja girince) yayını{" "}
+                <strong>otomatik başlat</strong>
+              </span>
+            </label>
+            <Link
+              to="/rapor"
+              className="hud-label block mt-4 text-center hover:text-primary"
+            >
+              → Haftalık Sürüş Raporu
+            </Link>
             <p className="text-xs text-muted-foreground mt-4 leading-relaxed">
               "Başlat"a bastığınızda tarayıcı konum izni isteyecek. İzin verdikten sonra yolcular
               konumunuzu ve durağa kalan süreyi görebilecek. Bu sekmeyi <strong>açık tutun</strong>.
@@ -432,6 +818,14 @@ function DriverApp() {
               </div>
             </div>
 
+            <WeatherCard
+              position={
+                position
+                  ? { lat: position.coords.latitude, lng: position.coords.longitude }
+                  : null
+              }
+            />
+
             <div className="panel p-5">
               <div className="flex items-center justify-between mb-3">
                 <div className="hud-label">Kalıcı Sürüş Sayacı (cihazda saklanır)</div>
@@ -474,6 +868,91 @@ function DriverApp() {
                 HAREKET SÜRESİ: {Math.floor(stats.movingSeconds / 60)} dk
               </div>
             </div>
+
+            {/* 10. madde: durak anonsu + ani fren */}
+            <div className="panel p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div className="hud-label">Durak Anonsu & Ani Fren</div>
+                <span className="text-[11px] font-mono text-muted-foreground">
+                  {motionReady ? "İVMEÖLÇER AKTİF" : "GPS YEDEĞİ"}
+                </span>
+              </div>
+
+              <label className="flex items-center gap-3 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={announceOn}
+                  onChange={(e) => {
+                    setAnnounceOn(e.target.checked);
+                    localStorage.setItem("acrob-stop-announce", e.target.checked ? "1" : "0");
+                  }}
+                  className="w-4 h-4 accent-primary"
+                />
+                <span>
+                  Durağa 350 m kalınca <strong>sesli anons</strong> yap (yolculara da gider)
+                </span>
+              </label>
+
+              <div className="mt-3 rounded-md border border-border p-3">
+                <div className="hud-label mb-1">Son Anons</div>
+                <div className="font-bold truncate">
+                  {lastAnnounce ? lastAnnounce.stopName : "—"}
+                </div>
+                {lastAnnounce && (
+                  <div className="text-[11px] font-mono text-muted-foreground mt-1">
+                    {new Date(lastAnnounce.ts).toLocaleTimeString("tr-TR")} · {lastAnnounce.distanceM} m
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between mt-4 mb-2">
+                <div className="hud-label">Ani Fren Kayıtları</div>
+                {brakes.length > 0 && (
+                  <button
+                    onClick={() => setBrakes([])}
+                    className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50"
+                  >
+                    Temizle
+                  </button>
+                )}
+              </div>
+              {brakes.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  Ani fren algılanmadı. Sert frenler burada ve yolcuların ekranında listelenir.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+                  {brakes.map((b) => (
+                    <div
+                      key={b.ts}
+                      className="flex items-center gap-3 px-3 py-2 rounded-md border border-border text-sm"
+                    >
+                      <span className="text-lg">{b.level === "sert" ? "🛑" : "⚠️"}</span>
+                      <div className="flex-1">
+                        <div className="font-semibold">
+                          {b.level === "sert" ? "Sert fren" : "Ani fren"} · {b.g.toFixed(2)} g
+                        </div>
+                        <div className="text-[11px] font-mono text-muted-foreground">
+                          {new Date(b.ts).toLocaleTimeString("tr-TR")} · {b.speedKmh} km/s ·{" "}
+                          {b.source}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+
+
+            <Suspense fallback={null}>
+              <DriverRadio
+                peerRef={peerRef}
+                connectionsRef={connectionsRef}
+                radioStreamRef={radioStreamRef}
+                broadcast={broadcastRadio}
+              />
+            </Suspense>
 
             <div className="panel p-5">
               <div className="flex items-center justify-between mb-3">
@@ -536,13 +1015,10 @@ function DriverApp() {
             <div className="panel overflow-hidden flex-1 min-h-[400px]">
               <Suspense fallback={null}>
                 <MapView
-                  stops={stops}
-                  busPosition={
-                    position
-                      ? { lat: position.coords.latitude, lng: position.coords.longitude }
-                      : null
-                  }
-                  routePath={routePath}
+                  stops={activeStops}
+                  busPosition={busPos}
+                  routePath={activeRoutePath}
+
                   className="h-full min-h-[400px]"
                 />
               </Suspense>

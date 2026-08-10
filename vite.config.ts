@@ -12,4 +12,9 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  vite: {
+    // MapLibre kendi web worker'ını yükler; Vite'ın dep-optimizer'ı bunu bozuyor.
+    optimizeDeps: { exclude: ["maplibre-gl"] },
+  },
 });
+

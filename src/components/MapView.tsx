@@ -1,36 +1,9 @@
-import { useEffect, useRef } from "react";
-import L from "leaflet";
+import { useEffect, useRef, useState } from "react";
+import * as maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 import type { Stop } from "@/lib/stops";
 
-// Leaflet default icon fix (bundler'da resim yolu bozuluyor)
-delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-});
-
-const busIcon = L.divIcon({
-  className: "bus-icon",
-  html: `<div style="width:36px;height:36px;border-radius:50%;background:oklch(0.62 0.22 25);border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 20px oklch(0.62 0.22 25 / 0.8);" class="pulse-marker">🚐</div>`,
-  iconSize: [36, 36],
-  iconAnchor: [18, 18],
-});
-
-const stopIcon = (isSelected: boolean) =>
-  L.divIcon({
-    className: "stop-icon",
-    html: `<div style="width:${isSelected ? 22 : 16}px;height:${isSelected ? 22 : 16}px;border-radius:50%;background:${isSelected ? "oklch(0.62 0.22 25)" : "oklch(0.98 0.005 240)"};border:3px solid oklch(0.16 0.01 260);box-shadow:0 0 8px rgba(0,0,0,0.6);"></div>`,
-    iconSize: [isSelected ? 22 : 16, isSelected ? 22 : 16],
-    iconAnchor: [isSelected ? 11 : 8, isSelected ? 11 : 8],
-  });
-
-const waypointIcon = L.divIcon({
-  className: "waypoint-icon",
-  html: `<div style="width:8px;height:8px;border-radius:50%;background:oklch(0.62 0.22 25 / 0.7);border:1px solid white;"></div>`,
-  iconSize: [8, 8],
-  iconAnchor: [4, 4],
-});
+const MAP_STYLE = "https://tiles.openfreemap.org/styles/dark";
 
 export interface MapViewProps {
   stops: Stop[];
@@ -40,6 +13,52 @@ export interface MapViewProps {
   center?: [number, number];
   className?: string;
   onMapClick?: (lat: number, lng: number) => void;
+}
+
+function busEl() {
+  const el = document.createElement("div");
+  el.className = "pulse-marker";
+  el.style.cssText =
+    "width:38px;height:38px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 6px 10px rgba(0,0,0,0.6));";
+  el.innerHTML = `<svg width="38" height="38" viewBox="0 0 24 24" fill="none">
+    <ellipse cx="12" cy="20" rx="6" ry="2" fill="rgba(0,0,0,0.35)"/>
+    <rect x="6" y="3" width="12" height="17" rx="3.5" fill="#f97316" stroke="#fff" stroke-width="1.4"/>
+    <path d="M8 7.5h8v3.5H8z" fill="#dbeafe"/>
+    <rect x="8" y="13" width="8" height="4.5" rx="1" fill="#fb923c"/>
+  </svg>`;
+  return el;
+}
+
+function bearingBetween(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const y = Math.sin(toRad(b.lng - a.lng)) * Math.cos(toRad(b.lat));
+  const x =
+    Math.cos(toRad(a.lat)) * Math.sin(toRad(b.lat)) -
+    Math.sin(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.cos(toRad(b.lng - a.lng));
+  return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
+}
+
+// Açı farkını en kısa yoldan yumuşat
+function smoothBearing(prev: number, next: number, factor = 0.35): number {
+  let diff = ((next - prev + 540) % 360) - 180;
+  return (prev + diff * factor + 360) % 360;
+}
+
+function stopEl(isSelected: boolean, isWaypoint: boolean) {
+  const el = document.createElement("div");
+  if (isWaypoint) {
+    el.style.cssText =
+      "width:8px;height:8px;border-radius:50%;background:rgba(239,68,68,0.75);border:1px solid #fff;";
+    return el;
+  }
+  const size = isSelected ? 22 : 16;
+  el.style.cssText = `width:${size}px;height:${size}px;border-radius:50%;background:${
+    isSelected ? "#ef4444" : "#f7f8fa"
+  };border:3px solid #14161c;box-shadow:0 0 8px rgba(0,0,0,0.6);`;
+  return el;
 }
 
 export default function MapView({
@@ -52,113 +71,328 @@ export default function MapView({
   onMapClick,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const layersRef = useRef<L.LayerGroup | null>(null);
-  const busMarkerRef = useRef<L.Marker | null>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const markersRef = useRef<maplibregl.Marker[]>([]);
+  const busMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const loadedRef = useRef(false);
+  const clickRef = useRef(onMapClick);
+  clickRef.current = onMapClick;
+  const [ready, setReady] = useState(false);
+  const [pitch, setPitch] = useState(55);
+  const [follow, setFollow] = useState(true);
+  const headingRef = useRef(0);
+  const lastPosRef = useRef<{ lat: number; lng: number } | null>(null);
 
+  // Harita kurulum
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, {
-      center,
+    const map = new maplibregl.Map({
+      container: containerRef.current,
+      style: MAP_STYLE,
+      center: [center[1], center[0]],
       zoom: 12,
-      zoomControl: true,
-      attributionControl: true,
+      pitch: 55,
+      bearing: -20,
+      maxPitch: 60,
+      // Performans: kenar yumuşatma kapalı, tile yeniden çekme yok, fade animasyonu yok
+      canvasContextAttributes: { antialias: false, powerPreference: "high-performance" },
+      refreshExpiredTiles: false,
+      fadeDuration: 0,
+      attributionControl: { compact: true },
     });
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "© OpenStreetMap",
-      maxZoom: 19,
-    }).addTo(map);
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 90, unit: "metric" }), "bottom-left");
+    map.addControl(new maplibregl.FullscreenControl(), "top-right");
+    map.addControl(
+      new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: true,
+      }),
+      "top-right",
+    );
+    map.touchZoomRotate.enableRotation();
+    // Stil sprite'ında olmayan ikonlar için uyarıları sustur
+    map.on("styleimagemissing", (e: { id: string }) => {
+      if (map.hasImage(e.id)) return;
+      map.addImage(e.id, { width: 1, height: 1, data: new Uint8Array(4) });
+    });
+    const ro = new ResizeObserver(() => map.resize());
+    ro.observe(containerRef.current);
+
+    map.on("load", () => {
+      loadedRef.current = true;
+
+      // Düşük donanım modu: perspektif 3D kalır; binalar, arazi alanları,
+      // yer adları ve desenler çizilmez. Yalnızca yollar, su ve rota görünür.
+      const keepBaseLayers = new Set([
+        "background",
+        "water",
+        "waterway",
+        "aeroway-taxiway",
+        "aeroway-runway-casing",
+        "aeroway-runway",
+        "road_area_pier",
+        "road_pier",
+        "highway_path",
+        "highway_minor",
+        "highway_major_casing",
+        "highway_major_inner",
+        "highway_major_subtle",
+        "highway_motorway_casing",
+        "highway_motorway_inner",
+        "highway_motorway_subtle",
+      ]);
+      map.getStyle().layers.forEach((layer) => {
+        if (!keepBaseLayers.has(layer.id)) map.setLayoutProperty(layer.id, "visibility", "none");
+      });
+
+      // Ara nokta katmanı (DOM işaretçisi yerine GPU)
+      map.addSource("acrob-waypoints", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      // Rota katmanları
+      map.addSource("acrob-route", {
+        type: "geojson",
+        data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [] } },
+      });
+      map.addLayer({
+        id: "acrob-route-casing",
+        type: "line",
+        source: "acrob-route",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#ffffff", "line-width": 12, "line-opacity": 0.55 },
+      });
+      map.addLayer({
+        id: "acrob-route-line",
+        type: "line",
+        source: "acrob-route",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#3b82f6", "line-width": 7, "line-opacity": 1 },
+      });
+
+      map.addLayer({
+        id: "acrob-waypoints-dots",
+        type: "circle",
+        source: "acrob-waypoints",
+        minzoom: 11,
+        paint: {
+          "circle-radius": 3.5,
+          "circle-color": "rgba(239,68,68,0.8)",
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#ffffff",
+        },
+      });
+
+      setReady(true);
+    });
+
+    map.on("click", (e: maplibregl.MapMouseEvent) => clickRef.current?.(e.lngLat.lat, e.lngLat.lng));
+    // Kullanıcı haritayı elle sürüklerse takibi bırak
+    map.on("dragstart", () => setFollow(false));
     mapRef.current = map;
-    layersRef.current = L.layerGroup().addTo(map);
     return () => {
+      ro.disconnect();
       map.remove();
       mapRef.current = null;
+      loadedRef.current = false;
+      setReady(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Tıklama handler (admin için)
+  // İmleç (admin tıklama modu)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    if (!onMapClick) return;
-    const handler = (e: L.LeafletMouseEvent) => onMapClick(e.latlng.lat, e.latlng.lng);
-    map.on("click", handler);
-    const el = map.getContainer();
-    el.style.cursor = "crosshair";
-    return () => {
-      map.off("click", handler);
-      el.style.cursor = "";
-    };
-  }, [onMapClick]);
+    map.getCanvas().style.cursor = onMapClick ? "crosshair" : "";
+  }, [onMapClick, ready]);
 
-  // Duraklar ve rota
+  // Rota çizgisi
   useEffect(() => {
     const map = mapRef.current;
-    const layers = layersRef.current;
-    if (!map || !layers) return;
-    layers.clearLayers();
+    if (!map || !ready) return;
+    const src = map.getSource("acrob-route") as maplibregl.GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData({
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "LineString",
+        coordinates: (routePath ?? []).map(([lat, lng]) => [lng, lat]),
+      },
+    });
+  }, [routePath, ready]);
 
-    if (routePath && routePath.length > 1) {
-      L.polyline(routePath, {
-        className: "service-road-route-casing",
-        color: "var(--route-line-casing)",
-        weight: 12,
-        opacity: 0.95,
-        lineCap: "round",
-        lineJoin: "round",
-      }).addTo(layers);
+  // Duraklar — gerçek duraklar DOM işaretçisi, ara noktalar GPU katmanı (çok daha hafif)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
 
-      L.polyline(routePath, {
-        className: "service-road-route",
-        color: "var(--route-line)",
-        weight: 7,
-        opacity: 1,
-        lineCap: "round",
-        lineJoin: "round",
-      }).addTo(layers);
-    }
-
+    const wp: Array<Record<string, unknown>> = [];
     stops.forEach((s) => {
-      const isWaypoint = s.kind === "waypoint";
-      L.marker([s.lat, s.lng], {
-        icon: isWaypoint ? waypointIcon : stopIcon(s.id === selectedStopId),
-        interactive: !isWaypoint,
-        keyboard: !isWaypoint,
-      })
-        .addTo(layers)
-        .bindTooltip(isWaypoint ? `Rota noktası #${s.order}` : `${s.order}. ${s.name}`, {
-          permanent: false,
-          direction: "top",
+      if (s.kind === "waypoint") {
+        wp.push({
+          type: "Feature",
+          properties: {},
+          geometry: { type: "Point", coordinates: [s.lng, s.lat] },
         });
+        return;
+      }
+      const marker = new maplibregl.Marker({ element: stopEl(s.id === selectedStopId, false) })
+        .setLngLat([s.lng, s.lat])
+        .addTo(map);
+      marker.setPopup(
+        new maplibregl.Popup({ offset: 16, closeButton: false }).setText(`${s.order}. ${s.name}`),
+      );
+      markersRef.current.push(marker);
     });
 
-    if (stops.length > 0) {
-      const bounds = L.latLngBounds(stops.map((s) => [s.lat, s.lng] as [number, number]));
-      if (busPosition) bounds.extend([busPosition.lat, busPosition.lng]);
-      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
-    }
-  }, [stops, selectedStopId, routePath, busPosition]);
+    const src = map.getSource("acrob-waypoints") as maplibregl.GeoJSONSource | undefined;
+    src?.setData({ type: "FeatureCollection", features: wp } as never);
+  }, [stops, selectedStopId, ready]);
 
-  // Servis konumu
+
+  // Görünümü yalnızca durak listesi değiştiğinde bir kez sığdır
+  const fitKeyRef = useRef("");
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !ready || stops.length === 0) return;
+    if (follow && busPosition) return; // takip modunda kamera araçta kalır
+    const key = stops.map((s) => `${s.lat},${s.lng}`).join("|");
+    if (fitKeyRef.current === key) return;
+    fitKeyRef.current = key;
+    const bounds = new maplibregl.LngLatBounds();
+    stops.forEach((s) => bounds.extend([s.lng, s.lat]));
+    map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 800 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stops, ready]);
+
+  // Servis konumu + arkadan takip kamerası
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
     if (!busPosition) {
-      if (busMarkerRef.current) {
-        busMarkerRef.current.remove();
-        busMarkerRef.current = null;
-      }
+      busMarkerRef.current?.remove();
+      busMarkerRef.current = null;
+      lastPosRef.current = null;
       return;
     }
-    if (busMarkerRef.current) {
-      busMarkerRef.current.setLatLng([busPosition.lat, busPosition.lng]);
-    } else {
-      busMarkerRef.current = L.marker([busPosition.lat, busPosition.lng], {
-        icon: busIcon,
-        zIndexOffset: 1000,
-      }).addTo(map);
-    }
-  }, [busPosition]);
 
-  return <div ref={containerRef} className={`w-full h-full ${className}`} />;
+    // Yön: önce gerçek hareketten, yoksa rota üzerindeki en yakın segmentten
+    const prev = lastPosRef.current;
+    let target = headingRef.current;
+    if (prev && (Math.abs(prev.lat - busPosition.lat) > 1e-6 || Math.abs(prev.lng - busPosition.lng) > 1e-6)) {
+      target = bearingBetween(prev, busPosition);
+    } else if (routePath && routePath.length > 1) {
+      let bi = 0;
+      let bd = Infinity;
+      routePath.forEach(([la, ln], i) => {
+        const d = (la - busPosition.lat) ** 2 + (ln - busPosition.lng) ** 2;
+        if (d < bd) {
+          bd = d;
+          bi = i;
+        }
+      });
+      const nxt = routePath[Math.min(bi + 1, routePath.length - 1)]!;
+      const cur = routePath[bi]!;
+      if (nxt !== cur) {
+        target = bearingBetween({ lat: cur[0], lng: cur[1] }, { lat: nxt[0], lng: nxt[1] });
+      }
+    }
+    headingRef.current = prev ? smoothBearing(headingRef.current, target) : target;
+    lastPosRef.current = { lat: busPosition.lat, lng: busPosition.lng };
+
+    if (busMarkerRef.current) {
+      busMarkerRef.current.setLngLat([busPosition.lng, busPosition.lat]);
+    } else {
+      busMarkerRef.current = new maplibregl.Marker({
+        element: busEl(),
+        rotationAlignment: "map",
+        pitchAlignment: "map",
+      })
+        .setLngLat([busPosition.lng, busPosition.lat])
+        .addTo(map);
+    }
+    busMarkerRef.current.setRotation(headingRef.current);
+
+    if (follow) {
+      map.easeTo({
+        center: [busPosition.lng, busPosition.lat],
+        bearing: headingRef.current,
+        pitch: Math.max(pitch, 55),
+        zoom: Math.max(map.getZoom(), 16),
+        offset: [0, map.getContainer().clientHeight * 0.22],
+        duration: 450,
+        easing: (t) => t * (2 - t),
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busPosition, ready, follow, pitch]);
+
+  const togglePitch = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const next = pitch > 10 ? 0 : 60;
+    setPitch(next);
+    map.easeTo({ pitch: next, duration: 600 });
+  };
+
+  const resetBearing = () => {
+    mapRef.current?.easeTo({ bearing: 0, duration: 600 });
+  };
+
+  const toggleFollow = () => {
+    const map = mapRef.current;
+    const next = !follow;
+    setFollow(next);
+    if (next && map && busPosition) {
+      map.easeTo({
+        center: [busPosition.lng, busPosition.lat],
+        bearing: headingRef.current,
+        pitch: 60,
+        zoom: 17,
+        offset: [0, map.getContainer().clientHeight * 0.22],
+        duration: 800,
+      });
+    }
+  };
+
+  return (
+    <div className={`relative w-full h-full ${className}`}>
+      <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
+      <div className="absolute left-3 top-3 z-[400] flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={togglePitch}
+          className="rounded-md border border-border bg-card/90 px-3 py-1.5 text-xs font-semibold text-foreground backdrop-blur transition hover:bg-card"
+        >
+          {pitch > 10 ? "2D Görünüm" : "3D Görünüm"}
+        </button>
+        <button
+          type="button"
+          onClick={resetBearing}
+          className="rounded-md border border-border bg-card/90 px-3 py-1.5 text-xs font-semibold text-foreground backdrop-blur transition hover:bg-card"
+        >
+          Kuzeye Dön
+        </button>
+        {busPosition && (
+          <button
+            type="button"
+            onClick={toggleFollow}
+            className={`rounded-md border px-3 py-1.5 text-xs font-semibold backdrop-blur transition ${
+              follow
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border bg-card/90 text-foreground hover:bg-card"
+            }`}
+          >
+            {follow ? "🎯 Takip Açık" : "Aracı Takip Et"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }

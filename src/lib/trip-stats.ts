@@ -70,12 +70,12 @@ export function avgSpeedKmh(stats: TripStats): number {
 // ============ GPS gürültü filtresi ============
 // Amaç: durakta beklerken km artmasın, GPS zıplaması "91 km/s" gibi sahte
 // zirveler üretmesin. Tüm eşikler servis aracı (şehir içi) için ayarlı.
-export const MAX_PLAUSIBLE_KMH = 110;
+export const MAX_PLAUSIBLE_KMH = 160;
 const MAX_ACCURACY_M = 30; // bundan kötü fix tamamen atılır
 const MAX_ACCEL_KMH_PER_S = 8; // gerçek araç ivmesi sınırı
 const MIN_DT = 1; // saniye
-const MAX_DT = 30; // saniye (uzun boşluk = güvenilmez)
-const SPEED_SMOOTHING = 0.35; // EMA katsayısı
+const MAX_DT = 600; // saniye (kırmızı ışık / mola: 10 dk'ya kadar tolerans)
+const SPEED_SMOOTHING = 0.45; // EMA katsayısı (daha hızlı tepki)
 
 export interface FixInput {
   lat: number;
@@ -126,18 +126,24 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   }
 
   const dt = (fix.ts - prev.ts) / 1000;
-  if (dt < MIN_DT || dt > MAX_DT) {
-    if (dt > MAX_DT) {
-      state.lastFix = fix;
-      state.smoothedKmh = 0;
-      state.fastStreak = 0;
-    }
+  if (dt < MIN_DT) {
     return { stats, speedKmh: state.smoothedKmh, accepted: false };
+  }
+  if (dt > MAX_DT) {
+    // Uzun bekleme sonrası: state'i tazele, GPS kendi hızını veriyorsa onu göster
+    state.lastFix = fix;
+    state.fastStreak = 0;
+    const gpsNow =
+      fix.gpsSpeedKmh != null && isFinite(fix.gpsSpeedKmh)
+        ? Math.min(Math.max(0, fix.gpsSpeedKmh), MAX_PLAUSIBLE_KMH)
+        : 0;
+    state.smoothedKmh = gpsNow;
+    return { stats, speedKmh: gpsNow, accepted: false };
   }
 
   const dm = haversine(prev, fix);
   // 2) Konum belirsizliğinden küçük hareketler = gürültü (durakta bekleme)
-  const noiseFloor = Math.max(8, (fix.accuracy + prev.accuracy) * 0.5);
+  const noiseFloor = Math.max(4, (fix.accuracy + prev.accuracy) * 0.4);
   if (dm < noiseFloor) {
     state.lastFix = fix;
     state.smoothedKmh = state.smoothedKmh * (1 - SPEED_SMOOTHING);

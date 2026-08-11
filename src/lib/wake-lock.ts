@@ -15,9 +15,11 @@ async function acquire(): Promise<boolean> {
   if (!isWakeLockSupported() || !wanted) return false;
   if (sentinel && !sentinel.released) return true;
   try {
-    const wl = (navigator as unknown as {
-      wakeLock: { request: (t: "screen") => Promise<Sentinel> };
-    }).wakeLock;
+    const wl = (
+      navigator as unknown as {
+        wakeLock: { request: (t: "screen") => Promise<Sentinel> };
+      }
+    ).wakeLock;
     sentinel = await wl.request("screen");
     sentinel.addEventListener?.("release", () => {
       sentinel = null;

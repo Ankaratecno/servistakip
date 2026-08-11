@@ -207,7 +207,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   // PeerJS ile şoföre bağlan
   useEffect(() => {
-    if (baseStops.length === 0) return;
     const peer = new Peer({ ...PEER_OPTIONS });
     peerRef.current = peer;
 
@@ -300,7 +299,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       connRef.current?.close();
       peer.destroy();
     };
-  }, [baseStops.length]);
+  }, []);
 
   useEffect(() => {
     const el = radioAudioRef.current;
@@ -734,6 +733,18 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             />
           </Suspense>
         </ClientOnly>
+      </div>
+      <div className="flex items-center justify-center gap-2 text-xs font-mono text-muted-foreground">
+        <span
+          className={`h-2 w-2 rounded-full ${status === "connected" && busPos ? "bg-live" : "bg-primary"}`}
+        />
+        {status === "connected" && busPos
+          ? `CANLI KONUM · ${busPos.lat.toFixed(5)}, ${busPos.lng.toFixed(5)}`
+          : status === "connected"
+            ? "BAĞLANDI · KONUM BEKLENİYOR"
+            : status === "waiting"
+              ? "ŞOFÖR YAYINI BEKLENİYOR"
+              : "BAĞLANIYOR"}
       </div>
       {!busPos && (
         <p className="text-xs text-muted-foreground text-center">

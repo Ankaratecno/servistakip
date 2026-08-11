@@ -235,7 +235,7 @@
   font-family: var(--font-display);
 }
 .leaflet-tile {
-  filter: brightness(0.7) invert(1) contrast(0.9) hue-rotate(200deg) saturate(0.4) brightness(0.85);
+  filter: brightness(0.72) invert(1) contrast(0.92) hue-rotate(190deg) saturate(0.35) brightness(0.82);
 }
 .leaflet-control-attribution {
   background: oklch(0.21 0.012 260 / 0.8) !important;
@@ -248,6 +248,32 @@
   background: var(--color-card) !important;
   color: var(--color-foreground) !important;
   border-color: var(--color-border) !important;
+}
+
+.map-stop-marker {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border: 3px solid var(--color-card);
+  border-radius: 9999px;
+  background: var(--color-foreground);
+  box-shadow: 0 0 8px oklch(0 0 0 / 0.65);
+}
+
+.map-stop-marker.is-selected {
+  width: 22px;
+  height: 22px;
+  background: var(--color-primary);
+}
+
+.map-bus-marker {
+  display: flex;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 6px 10px oklch(0 0 0 / 0.65));
+  animation: pulse-ring 2s ease-out infinite;
 }
 
 .service-road-route,

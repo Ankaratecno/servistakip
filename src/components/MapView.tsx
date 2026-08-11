@@ -16,7 +16,6 @@ export interface MapViewProps {
 const TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 const DEFAULT_CENTER: [number, number] = [39.925, 32.85];
 
-
 function stopIcon(selected: boolean) {
   const size = selected ? 22 : 16;
   return L.divIcon({
@@ -109,7 +108,6 @@ export default function MapView({
       busMarkerRef.current = null;
       hasPositionedRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

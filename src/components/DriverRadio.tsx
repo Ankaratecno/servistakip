@@ -153,13 +153,14 @@ export default function DriverRadio({
     const out = gainRef.current!;
     busyRef.current = true;
     setOnAir(label);
-    setNowPlaying(label);
+    // Teypte jingle/anons adı görünmez; çalan müziğin adı ekranda kalır.
     duck(true);
     callEveryone();
     broadcast({
       type: "radio",
       playing: true,
-      title: label,
+      // Teypte/kilit ekranında müzik adı kalsın; jingle etiketi gönderilmez.
+      title: tracksRef.current[indexRef.current]?.name ?? null,
       index: indexRef.current,
       total: tracksRef.current.length,
       ts: Date.now(),

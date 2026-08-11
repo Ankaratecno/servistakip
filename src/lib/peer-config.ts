@@ -38,6 +38,22 @@ export function reconnectDelay(attempt: number): number {
   return Math.round(base * (0.85 + Math.random() * 0.3));
 }
 
+/**
+ * YAPILACAKLAR3 #52: şoför henüz yayında değilken (peer-unavailable) sonsuz
+ * yeniden deneme; kısa ve öngörülebilir aralık: 3s → 5s → 10s (üst sınır).
+ */
+export function waitingRetryDelay(attempt: number): number {
+  const steps = [3000, 5000, 10000];
+  const base = steps[Math.min(attempt, steps.length - 1)]!;
+  return Math.round(base * (0.9 + Math.random() * 0.2));
+}
+
+/**
+ * YAPILACAKLAR3 #55: bağlantı açık görünse bile bu süredir hiç paket gelmiyorsa
+ * şoför "zombie" sayılır (kimlik sunucuda asılı kalmış) → yeniden bağlanılır.
+ */
+export const PRESENCE_TIMEOUT_MS = 15000;
+
 export type LiveStatus = "idle" | "connecting" | "connected" | "offline" | "waiting";
 
 // ---------- #15: bağlantı zaman aşımı ----------

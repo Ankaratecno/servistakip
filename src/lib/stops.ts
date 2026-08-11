@@ -12,7 +12,7 @@ export interface Stop {
   kind: StopKind;
 }
 
-const KEY = "acrob-stops-v10";
+const KEY = "acrob-stops-v11";
 
 // Sabit güzergâh — 8 durak + ELOKTROLAND fabrika, aradaki ROTA noktaları OSRM'in
 // yol takibi için ipucu görevi görür.
@@ -21,7 +21,7 @@ const SEED: Array<Omit<Stop, "id" | "order">> = [
   { name: "ROTA", lat: 39.9643, lng: 32.6355, kind: "waypoint" },
   { name: "ROTA", lat: 39.96957, lng: 32.61275, kind: "waypoint" },
   { name: "ROTA", lat: 39.981263, lng: 32.571191, kind: "waypoint" },
-  { name: "1.DURAK", lat: 39.9958, lng: 32.5764, kind: "stop" },
+  { name: "1.DURAK", lat: 39.99583, lng: 32.57631, kind: "stop" },
   { name: "ROTA", lat: 39.9955, lng: 32.5803, kind: "waypoint" },
   { name: "ROTA", lat: 39.996389, lng: 32.585908, kind: "waypoint" },
   { name: "ROTA", lat: 39.9946, lng: 32.5881, kind: "waypoint" },
@@ -30,12 +30,13 @@ const SEED: Array<Omit<Stop, "id" | "order">> = [
   { name: "ROTA", lat: 39.992864, lng: 32.622163, kind: "waypoint" },
   { name: "3.DURAK", lat: 39.9907, lng: 32.6395, kind: "stop" },
   { name: "ROTA", lat: 39.985991, lng: 32.645096, kind: "waypoint" },
-  { name: "4.DURAK", lat: 39.9807, lng: 32.6488, kind: "stop" },
+  { name: "4.DURAK", lat: 39.981285, lng: 32.64852, kind: "stop" },
   { name: "5.DURAK", lat: 39.9396, lng: 32.624, kind: "stop" },
   { name: "6.DURAK", lat: 39.8674, lng: 32.6387, kind: "stop" },
-  { name: "7.DURAK", lat: 39.87, lng: 32.6427, kind: "stop" },
-  { name: "8.DURAK", lat: 39.7759, lng: 32.6729, kind: "stop" },
-  { name: "ELOKTROLAND", lat: 39.7405, lng: 32.8095, kind: "stop" },
+  { name: "7.DURAK", lat: 39.870005, lng: 32.642608, kind: "stop" },
+  { name: "8.DURAK", lat: 39.775938, lng: 32.672799, kind: "stop" },
+  { name: "25 SAAT FIRIN", lat: 39.801592, lng: 32.804863, kind: "stop" },
+  { name: "ELOKTROLAND", lat: 39.741392, lng: 32.809128, kind: "stop" },
 ];
 
 const DEFAULT_STOPS: Stop[] = SEED.map((s, i) => ({

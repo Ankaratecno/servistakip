@@ -1,0 +1,18 @@
+{
+  "name": "Acrob Servis Takip",
+  "short_name": "Servis Takip",
+  "description": "Canlı servis aracı takibi, durak süresi ve şoför yayını.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "48x48",
+      "type": "image/x-icon"
+    }
+  ]
+}

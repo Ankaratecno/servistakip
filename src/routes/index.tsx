@@ -1,10 +1,14 @@
 import { usePassedStops, useTrimmedRoutePath } from "@/lib/passed-stops";
+import { readLastKnown, saveLastKnown, type LastKnownState } from "@/lib/pwa";
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
 import {
   PEER_OPTIONS,
   reconnectDelay,
+  waitingRetryDelay,
+  PRESENCE_TIMEOUT_MS,
   CONN_OPEN_TIMEOUT_MS,
   watchIceState,
   tryIceRestart,
@@ -55,7 +59,8 @@ import { setNowPlaying, setPlaybackState } from "@/lib/media-session";
 import type { MediaConnection } from "peerjs";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
-import type { DayLog, JourneyPayload } from "@/lib/journey-log";
+import { applyDelta } from "@/lib/journey-log";
+import type { DayLog, JourneyDeltaPayload, JourneyPayload } from "@/lib/journey-log";
 
 const MapView = lazy(() => import("@/components/MapView"));
 
@@ -190,6 +195,13 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   // Şoförün o sabah yayınladığı aktif güzergâh (atlanan duraklar çıkarılmış)
   const [driverStops, setDriverStops] = useState<Stop[] | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
+  // YAPILACAKLAR3 #50: tek dokunuşla ilk kurulum (ses + bildirim + durak)
+  const [onboarded, setOnboarded] = useState(true);
+  // YAPILACAKLAR3 #51: sürüş modu — güneş altında okunabilir dev tipografi
+  const [driveMode, setDriveMode] = useState(false);
+  // YAPILACAKLAR3 #48: son bilinen konum (çevrimdışı / yenileme sonrası)
+  const [lastKnown, setLastKnown] = useState<LastKnownState | null>(null);
+
   const [status, setStatus] = useState<LiveStatus>("idle");
   const [retryCount, setRetryCount] = useState(0);
   const [driver, setDriver] = useState<DriverPayload | null>(null);
@@ -242,7 +254,13 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const attemptRef = useRef(0);
   // YAPILACAKLAR3 #19: sekme gizliyken bekleyen deneme + görünür olunca anında bağlanma
   const connectRef = useRef<(() => void) | null>(null);
+  const scheduleRef = useRef<(() => void) | null>(null);
   const pendingRetryRef = useRef(false);
+  // #52/#54: son deneme zamanı ve "şoför yayında değil" ayrımı
+  const [lastAttemptAt, setLastAttemptAt] = useState(0);
+  const waitingRef = useRef(false);
+  // #55: presence zaman aşımı için son paket zamanı
+  const lastPacketRef = useRef(0);
 
   const stops = driverStops ?? baseStops;
 
@@ -254,7 +272,40 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     setBaseStops(getStops());
+    // #50/#51/#48: yolcu tercihleri ve son bilinen konum
+    try {
+      setOnboarded(localStorage.getItem("acrob-onboarded") === "1");
+      setDriveMode(localStorage.getItem("acrob-drive-mode") === "1");
+      const saved = localStorage.getItem("acrob-stop");
+      if (saved) setSelectedStopId(saved);
+    } catch {
+      setOnboarded(true);
+    }
+    setLastKnown(readLastKnown());
   }, []);
+
+  // #48: canlı konum geldikçe son bilinen durumu yerelde sakla
+  useEffect(() => {
+    if (!driver) return;
+    const snap = {
+      lat: driver.lat,
+      lng: driver.lng,
+      speedKmh: driver.speedKmh ?? 0,
+      ts: Date.now(),
+    };
+    setLastKnown(snap);
+    saveLastKnown(snap);
+  }, [driver?.lat, driver?.lng]);
+
+  // #59 hazırlığı / #50: seçilen durak hatırlanır
+  useEffect(() => {
+    if (!selectedStopId) return;
+    try {
+      localStorage.setItem("acrob-stop", selectedStopId);
+    } catch {
+      /* ignore */
+    }
+  }, [selectedStopId]);
 
   // Seçili durak aktif güzergâhta yoksa ilk gerçek durağa geç
   useEffect(() => {
@@ -293,6 +344,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
     const connect = () => {
       cleanupConn();
+      setLastAttemptAt(Date.now());
       setStatus((s: LiveStatus) => (s === "waiting" ? "waiting" : "connecting"));
       const conn = peer.connect(DRIVER_PEER_ID, { reliable: true });
       connRef.current = conn;
@@ -312,6 +364,8 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         if (openTimer) clearTimeout(openTimer);
         openTimer = null;
         attemptRef.current = 0;
+        waitingRef.current = false;
+        lastPacketRef.current = Date.now();
         setRetryCount(0);
         setStatus("connected");
         // #16: zombie bağlantı (açık ama veri akmıyor) tespiti
@@ -334,9 +388,12 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           | DriverRoutePayload
           | RadioStatePayload
           | JourneyPayload
+          | JourneyDeltaPayload
           | StopAnnouncePayload
           | BrakeEventPayload
           | PingPayload;
+        // #55: her paket presence kanıtıdır
+        lastPacketRef.current = Date.now();
         // #17: şoförün kalp atışına pong ile cevap ver
         if (p?.type === "ping") {
           try {
@@ -351,6 +408,9 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           setDriverRecvAt(Date.now());
         } else if (p?.type === "radio") setRadio(p as RadioStatePayload);
         else if (p?.type === "journey") setDay((p as JourneyPayload).day);
+        // #41: yalnızca değişen alanlar geldi → mevcut günün üzerine uygula
+        else if (p?.type === "journey-delta")
+          setDay((prev) => applyDelta(prev, p as JourneyDeltaPayload));
         else if (p?.type === "announce") {
           const a = p as StopAnnouncePayload;
           setAnnounce(a);
@@ -391,10 +451,13 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         pendingRetryRef.current = true;
         return;
       }
+      // #52: şoför henüz yayında değilse kısa aralıkla sonsuz yakalama denemesi
+      const delay = waitingRef.current ? waitingRetryDelay(attempt) : reconnectDelay(attempt);
       reconnectTimerRef.current = setTimeout(() => {
         if (peerRef.current && !peerRef.current.destroyed) connect();
-      }, reconnectDelay(attempt));
+      }, delay);
     };
+    scheduleRef.current = scheduleReconnect;
 
     // #14: signaling sunucusu düşerse peer.connect() sessizce başarısız olur
     peer.on("disconnected", () => {
@@ -447,10 +510,15 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     });
 
     peer.on("error", (err) => {
-      // Bulgu 7: şoför hiç yayında değilse "peer-unavailable" gelir → "yayın yok".
-      // Diğer hatalar gerçek bağlantı sorunudur → "çevrimdışı".
-      if (String(err?.type) === "peer-unavailable") setStatus("waiting");
-      else setStatus("offline");
+      // #54: şoför hiç yayında değilse "peer-unavailable" → "yayında değil";
+      // diğer hatalar gerçek bağlantı sorunudur → "çevrimdışı".
+      if (String(err?.type) === "peer-unavailable") {
+        waitingRef.current = true;
+        setStatus("waiting");
+      } else {
+        waitingRef.current = false;
+        setStatus("offline");
+      }
       scheduleReconnect();
     });
 
@@ -464,15 +532,16 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     };
   }, []);
 
-  // YAPILACAKLAR3 #19: sekme geri gelince / ağ dönünce anında tek deneme
-  useEffect(() => {
-    const retryNow = () => {
+  // YAPILACAKLAR3 #19/#57: sekme geri gelince / ağ dönünce anında tek deneme
+  const retryNow = useMemo(() => {
+    return () => {
       const conn = connRef.current;
       if (conn?.open) return;
       pendingRetryRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       const peer = peerRef.current;
       if (!peer || peer.destroyed) return;
+      setLastAttemptAt(Date.now());
       if (peer.disconnected) {
         try {
           peer.reconnect();
@@ -483,6 +552,9 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       }
       connectRef.current?.();
     };
+  }, []);
+
+  useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "visible") retryNow();
     };
@@ -492,6 +564,26 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("online", retryNow);
     };
+  }, [retryNow]);
+
+  // YAPILACAKLAR3 #55: "açık ama sessiz" (zombie) şoför kimliği tespiti.
+  // 15 sn'dir hiç paket yoksa bağlantı kapatılıp yeniden kurulur.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const conn = connRef.current;
+      if (!conn?.open) return;
+      const last = lastPacketRef.current;
+      if (!last || Date.now() - last < PRESENCE_TIMEOUT_MS) return;
+      lastPacketRef.current = 0;
+      try {
+        conn.close();
+      } catch {
+        /* ignore */
+      }
+      setStatus("offline");
+      scheduleRef.current?.();
+    }, 3000);
+    return () => window.clearInterval(id);
   }, []);
 
   const volumeRef = useRef(radioVolume);
@@ -511,13 +603,12 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     applyRadioVolume();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [radioOn, radioVolume, radioStreamOk]);
 
-  // Araç teybi / Bluetooth ekranında çalan parça adı görünsün
+  // Araç teybi / Bluetooth ekranında SADECE çalan parçanın adı görünsün
   useEffect(() => {
     const live = Boolean(radio?.playing) && radioOn;
-    setNowPlaying(live ? (radio?.title ?? "Servis Radyosu") : null);
+    setNowPlaying(live ? (radio?.title ?? null) : null);
     setPlaybackState(live);
   }, [radio?.playing, radio?.title, radioOn]);
 
@@ -527,7 +618,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         duckRef.current = speaking;
         applyRadioVolume();
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
     [],
   );
 
@@ -733,14 +824,44 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   const takipTab = (
     <div className="flex flex-col gap-4">
-      <StatusBadge status={status} retry={retryCount} />
+      <StatusBadge
+        status={status}
+        retry={retryCount}
+        lastAttemptAt={lastAttemptAt}
+        nowTick={nowTick}
+        onRetry={retryNow}
+      />
 
       <div className="panel p-5">
-        <div className="hud-label mb-3">Durağınız</div>
+        <div className="flex items-center justify-between mb-3 gap-2">
+          <div className="hud-label">Durağınız</div>
+          {/* YAPILACAKLAR3 #51: sürüş/güneş modu — dev tipografi */}
+          <button
+            onClick={() => {
+              const next = !driveMode;
+              setDriveMode(next);
+              try {
+                localStorage.setItem("acrob-drive-mode", next ? "1" : "0");
+              } catch {
+                /* ignore */
+              }
+            }}
+            aria-pressed={driveMode}
+            className={`text-[11px] font-bold uppercase tracking-wider px-3 py-1.5 rounded-md border transition ${
+              driveMode
+                ? "bg-primary text-primary-foreground border-primary"
+                : "border-border text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {driveMode ? "🔆 Büyük Yazı Açık" : "🔆 Büyük Yazı"}
+          </button>
+        </div>
         <select
           value={selectedStopId ?? ""}
           onChange={(e) => setSelectedStopId(e.target.value)}
-          className="w-full bg-input border border-border rounded-md px-3 py-3 text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-primary"
+          className={`w-full bg-input border border-border rounded-md px-3 font-semibold focus:outline-none focus:ring-2 focus:ring-primary ${
+            driveMode ? "py-4 text-2xl" : "py-3 text-lg"
+          }`}
         >
           {stops
             .filter((s) => s.kind === "stop")
@@ -756,7 +877,9 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         <div className="hud-label mb-2">Tahmini Varış</div>
         {status !== "connected" ? (
           <div>
-            <div className="text-3xl font-bold text-muted-foreground">
+            <div
+              className={`font-bold text-muted-foreground ${driveMode ? "text-4xl" : "text-3xl"}`}
+            >
               {status === "waiting" || status === "idle"
                 ? "Şoför Yayında Değil"
                 : status === "offline"
@@ -766,18 +889,38 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             <p className="text-sm text-muted-foreground mt-2">
               Şoför sistemi başlattığında otomatik bağlanılacak.
             </p>
+            {/* #48: çevrimdışı / yayın yokken en azından son bilinen durum */}
+            {lastKnown && (
+              <p className="text-xs font-mono text-muted-foreground mt-3">
+                SON BİLİNEN KONUM: {lastKnown.lat.toFixed(5)}, {lastKnown.lng.toFixed(5)} ·{" "}
+                {Math.round(lastKnown.speedKmh)} KM/S ·{" "}
+                {new Date(lastKnown.ts).toLocaleTimeString("tr-TR")}
+              </p>
+            )}
           </div>
         ) : !etaText ? (
           <div className="text-2xl text-muted-foreground">Hesaplanıyor...</div>
         ) : (
           <>
             <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="text-5xl font-bold text-primary font-mono">{etaText.minutes}</span>
-              <span className="text-lg text-muted-foreground">dakika</span>
-              <span className="text-3xl font-bold text-primary font-mono ml-2">{etaText.secs}</span>
-              <span className="text-lg text-muted-foreground">saniye</span>
+              <span
+                className={`font-bold text-primary font-mono ${driveMode ? "text-8xl" : "text-5xl"}`}
+              >
+                {etaText.minutes}
+              </span>
+              <span className={driveMode ? "text-2xl" : "text-lg text-muted-foreground"}>
+                dakika
+              </span>
+              <span
+                className={`font-bold text-primary font-mono ml-2 ${driveMode ? "text-5xl" : "text-3xl"}`}
+              >
+                {etaText.secs}
+              </span>
+              <span className={driveMode ? "text-xl" : "text-lg text-muted-foreground"}>
+                saniye
+              </span>
             </div>
-            <p className="text-sm text-muted-foreground mt-3">
+            <p className={`text-muted-foreground mt-3 ${driveMode ? "text-lg" : "text-sm"}`}>
               sonra <span className="text-foreground font-semibold">{selectedStop?.name}</span>{" "}
               durağınızda.
             </p>
@@ -1083,12 +1226,24 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     </div>
   );
 
+  // Hava durumu konumu: canlı yayın → son bilinen konum → güzergâhın ilk durağı.
+  // Böylece şoför yayında olmasa da yolcu panelinde hava durumu görünür.
+  const weatherPos = driver
+    ? { lat: driver.lat, lng: driver.lng }
+    : lastKnown
+      ? { lat: lastKnown.lat, lng: lastKnown.lng }
+      : baseStops[0]
+        ? { lat: baseStops[0].lat, lng: baseStops[0].lng }
+        : null;
+  const weatherSubtitle = driver
+    ? "Servisin bulunduğu noktanın anlık havası · Open-Meteo (ücretsiz)"
+    : lastKnown
+      ? "Şoför yayında değil · son bilinen servis konumuna göre · Open-Meteo"
+      : "Şoför yayında değil · güzergâhın başlangıç noktasına göre · Open-Meteo";
+
   const bilgiTab = (
     <div className="flex flex-col gap-4">
-      <WeatherCard
-        position={driver ? { lat: driver.lat, lng: driver.lng } : null}
-        subtitle="Servisin bulunduğu noktanın anlık havası · Open-Meteo (ücretsiz)"
-      />
+      <WeatherCard position={weatherPos} subtitle={weatherSubtitle} />
 
       <div className="panel p-5">
         <div className="hud-label mb-3">Araç</div>
@@ -1176,6 +1331,64 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           <span className="text-base font-semibold">{flash.body}</span>
           <span className="text-xs opacity-80 mt-2">kapatmak için dokun</span>
         </button>
+      )}
+
+      {/* YAPILACAKLAR3 #50: tek dokunuşla ilk kurulum */}
+      {!onboarded && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-background/95 backdrop-blur px-4 py-6">
+          <div className="panel w-full max-w-md p-6">
+            <div className="hud-label">Hoş geldin</div>
+            <h2 className="text-2xl font-black mt-1">Servisi takip etmeye başla</h2>
+            <p className="text-sm text-muted-foreground mt-2">
+              Tek dokunuşla durağını seç, sesli uyarıları ve bildirimleri aç. Sonradan istediğin
+              zaman değiştirebilirsin.
+            </p>
+            <div className="mt-5">
+              <div className="hud-label mb-2">Durağın</div>
+              <select
+                value={selectedStopId ?? ""}
+                onChange={(e) => setSelectedStopId(e.target.value)}
+                className="w-full bg-input border border-border rounded-md px-3 py-3 text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                {stops
+                  .filter((s) => s.kind === "stop")
+                  .map((s, i) => (
+                    <option key={s.id} value={s.id}>
+                      {i + 1}. {s.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <button
+              onClick={() => {
+                enableRadio();
+                void ensureNotificationPermission().then(setNotifyReady);
+                try {
+                  localStorage.setItem("acrob-onboarded", "1");
+                } catch {
+                  /* ignore */
+                }
+                setOnboarded(true);
+              }}
+              className="mt-5 w-full py-4 rounded-md bg-primary text-primary-foreground font-black text-lg tracking-wide hover:bg-primary/90 transition"
+            >
+              🔊🔔 Sesi ve Bildirimi Aç · Başla
+            </button>
+            <button
+              onClick={() => {
+                try {
+                  localStorage.setItem("acrob-onboarded", "1");
+                } catch {
+                  /* ignore */
+                }
+                setOnboarded(true);
+              }}
+              className="mt-2 w-full py-2.5 rounded-md text-sm text-muted-foreground hover:text-foreground"
+            >
+              Şimdilik geç
+            </button>
+          </div>
+        </div>
       )}
 
       <main
@@ -1356,7 +1569,19 @@ function Header({ right }: { right?: React.ReactNode }) {
   );
 }
 
-function StatusBadge({ status, retry = 0 }: { status: LiveStatus; retry?: number }) {
+function StatusBadge({
+  status,
+  retry = 0,
+  lastAttemptAt = 0,
+  nowTick = 0,
+  onRetry,
+}: {
+  status: LiveStatus;
+  retry?: number;
+  lastAttemptAt?: number;
+  nowTick?: number;
+  onRetry?: () => void;
+}) {
   const map: Record<LiveStatus, { text: string; color: string; dot: string }> = {
     idle: { text: "Bekliyor", color: "bg-muted", dot: "bg-muted-foreground" },
     connecting: { text: "Bağlanıyor", color: "bg-secondary", dot: "bg-yellow-500 animate-pulse" },
@@ -1365,18 +1590,32 @@ function StatusBadge({ status, retry = 0 }: { status: LiveStatus; retry?: number
     offline: { text: "Bağlantı Koptu", color: "bg-muted", dot: "bg-red-500" },
   };
   const s = map[status];
+  // #54: "yayında değil" ile "bağlanılıyor" ayrımı + son deneme bilgisi
+  const agoSec =
+    lastAttemptAt && nowTick ? Math.max(0, Math.round((nowTick - lastAttemptAt) / 1000)) : null;
+  const showRetry = Boolean(onRetry) && status !== "connected";
   return (
     <div className={`panel px-4 py-3 flex items-center gap-3 ${s.color}`}>
       <div className={`w-2.5 h-2.5 rounded-full ${s.dot}`} />
-      <div className="flex flex-col leading-tight">
+      <div className="flex flex-col leading-tight flex-1 min-w-0">
         <span className="text-sm font-semibold uppercase tracking-wider">
           {s.text}
-          {status !== "connected" && retry > 0 ? ` · yeniden deneme ${retry}` : ""}
+          {status !== "connected" && retry > 0 ? ` · ${retry}. deneme` : ""}
         </span>
-        <span className="text-[11px] font-mono text-muted-foreground">
+        <span className="text-[11px] font-mono text-muted-foreground truncate">
+          {status !== "connected" && agoSec !== null ? `son deneme: ${agoSec} sn önce · ` : ""}
           {SERVICE_INFO.plate} · {SERVICE_INFO.driverName}
         </span>
       </div>
+      {showRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="shrink-0 text-xs font-semibold uppercase tracking-wider px-3 py-2 rounded-md bg-secondary hover:bg-secondary/80 border border-border"
+        >
+          Tekrar dene
+        </button>
+      ) : null}
     </div>
   );
 }

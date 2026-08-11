@@ -77,6 +77,32 @@ export async function saveDay(day: DayLog): Promise<void> {
   }
 }
 
+// YAPILACAKLAR3 #43: her GPS fix'inde IndexedDB'ye yazmak batarya ve disk
+// yıpratıyordu. Yazımlar toplanır, en fazla 5 sn'de bir diske işlenir;
+// sayfa gizlenince / kapanınca anında boşaltılır.
+const FLUSH_MS = 5000;
+let pending: DayLog | null = null;
+let flushTimer: number | null = null;
+
+export function saveDayBatched(day: DayLog): void {
+  pending = day;
+  if (flushTimer !== null) return;
+  flushTimer = (globalThis.setTimeout as typeof setTimeout)(() => {
+    flushTimer = null;
+    void flushDay();
+  }, FLUSH_MS) as unknown as number;
+}
+
+export async function flushDay(): Promise<void> {
+  const day = pending;
+  pending = null;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (day) await saveDay(day);
+}
+
 export async function listDays(limit = 14): Promise<DayLog[]> {
   try {
     const db = await openDb();
@@ -169,11 +195,73 @@ export function recordArrival(day: DayLog, stopId: string, name: string, ts = Da
   return { ...day, arrivals: [...day.arrivals, { stopId, name, ts }] };
 }
 
-/** Yolculara gönderilen paket */
+/** Yolculara gönderilen tam anlık görüntü (yalnızca ilk bağlantıda / periyodik senkron) */
 export interface JourneyPayload {
   type: "journey";
   day: DayLog;
   ts: number;
+}
+
+/**
+ * YAPILACAKLAR3 #41: tüm DayLog'u her değişimde göndermek yerine yalnızca
+ * değişen alanlar gönderilir (veri kullanımı ~10-50 kat azalır).
+ */
+export interface JourneyDeltaPayload {
+  type: "journey-delta";
+  date: string;
+  meters?: number;
+  drivingSeconds?: number;
+  /** Yalnızca yeni eklenen varışlar */
+  arrivals?: StopArrival[];
+  /** Oturum listesi değiştiyse (kontak aç/kapa) tam liste — küçüktür */
+  sessions?: IgnitionSession[];
+  ts: number;
+}
+
+/** Delta paketini yolcu tarafındaki güne uygular. */
+export function applyDelta(day: DayLog | null, d: JourneyDeltaPayload): DayLog {
+  const base = day && day.date === d.date ? day : emptyDay(d.date);
+  const known = new Set(base.arrivals.map((a) => a.stopId));
+  const arrivals = d.arrivals?.length
+    ? [...base.arrivals, ...d.arrivals.filter((a) => !known.has(a.stopId))]
+    : base.arrivals;
+  return {
+    ...base,
+    meters: d.meters ?? base.meters,
+    drivingSeconds: d.drivingSeconds ?? base.drivingSeconds,
+    sessions: d.sessions ?? base.sessions,
+    arrivals,
+    updatedAt: d.ts,
+  };
+}
+
+/** İki gün kaydı arasındaki farkı üretir; fark yoksa null döner. */
+export function diffDay(prev: DayLog | null, next: DayLog): JourneyDeltaPayload | null {
+  const delta: JourneyDeltaPayload = { type: "journey-delta", date: next.date, ts: Date.now() };
+  let changed = false;
+  if (!prev || prev.date !== next.date) return null; // gün değişti → tam paket gerekir
+  if ((prev.meters ?? 0) !== (next.meters ?? 0)) {
+    delta.meters = next.meters;
+    changed = true;
+  }
+  if ((prev.drivingSeconds ?? 0) !== (next.drivingSeconds ?? 0)) {
+    delta.drivingSeconds = next.drivingSeconds;
+    changed = true;
+  }
+  if (next.arrivals.length > prev.arrivals.length) {
+    delta.arrivals = next.arrivals.slice(prev.arrivals.length);
+    changed = true;
+  }
+  const sameSessions =
+    prev.sessions.length === next.sessions.length &&
+    prev.sessions.every(
+      (s, i) => s.start === next.sessions[i]?.start && s.end === next.sessions[i]?.end,
+    );
+  if (!sameSessions) {
+    delta.sessions = next.sessions;
+    changed = true;
+  }
+  return changed ? delta : null;
 }
 
 export const ARRIVAL_RADIUS_M = 100;

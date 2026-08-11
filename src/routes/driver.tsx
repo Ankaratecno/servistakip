@@ -60,13 +60,16 @@ import {
   addDriving,
   closeSession,
   clearDay,
+  diffDay,
   distanceM,
+  flushDay,
   loadDay,
   openSession,
   recordArrival,
-  saveDay,
+  saveDayBatched,
   todayKey,
   type DayLog,
+  type JourneyDeltaPayload,
   type JourneyPayload,
 } from "@/lib/journey-log";
 
@@ -251,8 +254,15 @@ function DriverApp() {
   const iceStopRef = useRef<Map<string, () => void>>(new Map());
   const [relayStatus, setRelayStatus] = useState<RelayStatus>("unknown");
   const lastBroadcastRef = useRef<number>(0);
+  /** #42: aracın ne zamandır durduğu (ms epoch, 0 = hareket halinde) */
+  const stoppedSinceRef = useRef<number>(0);
   // YAPILACAKLAR3 #27: radyo yayınını gerçekten alan / dinleyen yolcu sayısı
   const [radioAudio, setRadioAudio] = useState({ receiving: 0, listening: 0 });
+  // YAPILACAKLAR3 #49: şoför tarafı yayın sağlığı (sinyal sunucusu + ağ durumu)
+  const [signalOk, setSignalOk] = useState(true);
+  const [netOnline, setNetOnline] = useState(true);
+  const [signalRetry, setSignalRetry] = useState(0);
+  const signalRetryRef = useRef(0);
 
   // Rota noktaları dahil tüm liste (şoför her noktayı başlangıç seçebilir / atlayabilir)
   const realStops = allStops;
@@ -383,6 +393,8 @@ function DriverApp() {
   };
 
   // --- 7. madde: günlük hareket kaydı (IndexedDB) ---
+  // #41: yolculara tam DayLog yerine delta gönderilir; #43: disk yazımı toplanır.
+  const sentDayRef = useRef<DayLog | null>(null);
   const applyDay = (fn: (d: DayLog) => DayLog) => {
     const cur = dayRef.current;
     if (!cur) return;
@@ -390,8 +402,15 @@ function DriverApp() {
     if (next === cur) return;
     dayRef.current = next;
     setDay(next);
-    void saveDay(next);
-    const payload: JourneyPayload = { type: "journey", day: next, ts: Date.now() };
+    saveDayBatched(next);
+    const delta = diffDay(sentDayRef.current, next);
+    const payload: JourneyPayload | JourneyDeltaPayload = delta ?? {
+      type: "journey",
+      day: next,
+      ts: Date.now(),
+    };
+    if (delta === null && sentDayRef.current === next) return;
+    sentDayRef.current = next;
     connectionsRef.current.forEach((c) => {
       try {
         if (c.open) c.send(payload);
@@ -406,6 +425,18 @@ function DriverApp() {
       dayRef.current = d;
       setDay(d);
     });
+    // #43: sekme gizlenince / kapanınca bekleyen kayıt anında diske yazılır
+    const flush = () => void flushDay();
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
   }, []);
 
   // Kontak hack'i: şarj başladı = kontak açık, kesildi = duruş
@@ -625,9 +656,28 @@ function DriverApp() {
       idRetryRef.current = 0;
       setError(null);
       setPeerReady(true);
+      setSignalOk(true);
+      setSignalRetry(0);
       setRunning(true);
       runningRef.current = true;
       applyDay((d) => openSession(d));
+    });
+
+    // YAPILACAKLAR3 #49: sinyal (signaling) sunucusuyla bağlantı koparsa yayın
+    // kimliği düşer ve yeni yolcu bağlanamaz. Kademeli olarak kendini toparlar.
+    peer.on("disconnected", () => {
+      setSignalOk(false);
+      if (!runningRef.current || peer.destroyed) return;
+      const attempt = signalRetryRef.current++;
+      setSignalRetry(attempt + 1);
+      window.setTimeout(() => {
+        if (!runningRef.current || peer.destroyed || !peer.disconnected) return;
+        try {
+          peer.reconnect();
+        } catch {
+          /* bir sonraki denemede tekrar */
+        }
+      }, reconnectDelay(attempt));
     });
 
     peer.on("connection", (conn) => {
@@ -668,7 +718,9 @@ function DriverApp() {
         if (p) conn.send(p);
         if (dayRef.current) {
           try {
+            // Yeni bağlanan yolcu tam anlık görüntü alır; sonrası delta.
             conn.send({ type: "journey", day: dayRef.current, ts: Date.now() } as JourneyPayload);
+            sentDayRef.current = dayRef.current;
           } catch {
             /* ignore */
           }
@@ -776,9 +828,19 @@ function DriverApp() {
       if (last) {
         const ageMs = now - last.fixTs;
         setFixAgeMs(ageMs);
-        // #20: araç duruyorsa yayın periyodu seyreltilir (veri + batarya)
+        // #20/#42: araç duruyorsa yayın periyodu kademeli seyreltilir.
+        // 0-15 sn duruş: 3 sn · 15 sn+ duruş: 6 sn · 60 sn+ duruş: 10 sn
         const stationary = last.speedKmh < 2;
-        const period = stationary ? 3000 : 1000;
+        if (!stationary) stoppedSinceRef.current = 0;
+        else if (stoppedSinceRef.current === 0) stoppedSinceRef.current = now;
+        const stoppedMs = stationary ? now - stoppedSinceRef.current : 0;
+        const period = !stationary
+          ? 1000
+          : stoppedMs > 60000
+            ? 10000
+            : stoppedMs > 15000
+              ? 6000
+              : 3000;
         if (now - lastBroadcastRef.current >= period - 100) {
           lastBroadcastRef.current = now;
           broadcastPosition({ ...last, ageMs, ts: now });
@@ -865,6 +927,8 @@ function DriverApp() {
   const stopInternal = () => {
     runningRef.current = false;
     applyDay((d) => closeSession(d));
+    void flushDay(); // #43: sefer bitişinde bekleyen kayıt anında diske yazılır
+
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
@@ -944,7 +1008,46 @@ function DriverApp() {
     };
   }, [running]);
 
+  // YAPILACAKLAR3 #49: yayın açıkken sinyal sunucusu / ağ nöbetçisi.
+  // Ağ döndüğünde ya da bağlantı sessizce düştüğünde yayın kendini toparlar.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setNetOnline(navigator.onLine);
+    const kick = () => {
+      const p = peerRef.current;
+      if (!runningRef.current || !p || p.destroyed) return;
+      if (p.disconnected) {
+        try {
+          p.reconnect();
+        } catch {
+          /* nöbetçi tekrar deneyecek */
+        }
+      }
+    };
+    const onOnline = () => {
+      setNetOnline(true);
+      kick();
+    };
+    const onOffline = () => setNetOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    const timer = window.setInterval(() => {
+      const p = peerRef.current;
+      if (!runningRef.current || !p || p.destroyed) return;
+      const ok = !p.disconnected;
+      setSignalOk(ok);
+      if (ok) signalRetryRef.current = 0;
+      else kick();
+    }, 5000);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      window.clearInterval(timer);
+    };
+  }, []);
+
   // Sekme kapanırken/arka plana atılırken yayın kimliğini sunucuda serbest bırak
+
   useEffect(() => {
     const release = () => {
       if (!runningRef.current && !peerRef.current) return;
@@ -1078,19 +1181,17 @@ function DriverApp() {
         ) : (
           <>
             <div className="panel p-5 flex items-center gap-4">
-              <div className="w-3 h-3 rounded-full bg-primary animate-pulse" />
+              <div
+                className={`w-3 h-3 rounded-full ${signalOk && netOnline ? "bg-primary animate-pulse" : "bg-red-500"}`}
+              />
               <div className="flex-1">
                 <div className="hud-label">Durum</div>
-                <div className="font-bold">YAYINDA · {SERVICE_INFO.plate}</div>
-                {/* #18: röle (TURN) erişilebilirlik rozeti */}
-                <div className="hud-label mt-0.5">
-                  {relayStatus === "checking"
-                    ? "Röle (TURN) kontrol ediliyor…"
-                    : relayStatus === "ok"
-                      ? "Röle (TURN) hazır · zayıf ağlarda yedek var"
-                      : relayStatus === "unavailable"
-                        ? "Röle (TURN) yanıt vermiyor · bazı yolcular bağlanamayabilir"
-                        : ""}
+                <div className="font-bold">
+                  {!netOnline
+                    ? "İNTERNET YOK · yayın bekliyor"
+                    : !signalOk
+                      ? `SİNYAL KOPTU · yeniden bağlanılıyor (${signalRetry})`
+                      : `YAYINDA · ${SERVICE_INFO.plate}`}
                 </div>
               </div>
               <div className="text-right">
@@ -1103,6 +1204,54 @@ function DriverApp() {
               >
                 Durdur
               </button>
+            </div>
+
+            {/* YAPILACAKLAR3 #49: yayın sağlığı – tek bakışta her şey */}
+            <div className="panel px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-mono">
+              <HealthItem
+                label="GPS"
+                value={position ? `±${Math.round(position.coords.accuracy)} m` : "yok"}
+                ok={Boolean(position) && (position?.coords.accuracy ?? 999) <= 35}
+                warn={Boolean(position) && (position?.coords.accuracy ?? 999) <= 90}
+              />
+              <HealthItem
+                label="Fix yaşı"
+                value={fixAgeMs == null ? "—" : `${Math.round(fixAgeMs / 1000)} sn`}
+                ok={fixAgeMs != null && fixAgeMs < 5000}
+                warn={fixAgeMs != null && fixAgeMs < 15000}
+              />
+              <HealthItem
+                label="Sinyal"
+                value={!netOnline ? "internet yok" : signalOk ? "bağlı" : `yeniden ${signalRetry}`}
+                ok={netOnline && signalOk}
+              />
+              <HealthItem label="Yolcu" value={`${connCount}`} ok={connCount > 0} warn />
+              <HealthItem
+                label="Röle"
+                value={
+                  relayStatus === "ok"
+                    ? "hazır"
+                    : relayStatus === "checking"
+                      ? "kontrol…"
+                      : relayStatus === "unavailable"
+                        ? "yok"
+                        : "—"
+                }
+                ok={relayStatus === "ok"}
+                warn={relayStatus === "checking" || relayStatus === "unknown"}
+              />
+              <HealthItem
+                label="Radyo"
+                value={`${radioAudio.listening}/${radioAudio.receiving} dinliyor`}
+                ok={radioAudio.listening > 0}
+                warn
+              />
+              <HealthItem
+                label="Ekran"
+                value={awake ? "açık tutuluyor" : "kilitlenebilir"}
+                ok={awake}
+                warn
+              />
             </div>
 
             <div className="panel p-5">
@@ -1468,5 +1617,26 @@ function StopPlanner({
         })}
       </div>
     </div>
+  );
+}
+
+/** YAPILACAKLAR3 #49: yayın sağlığı satırındaki tek gösterge. */
+function HealthItem({
+  label,
+  value,
+  ok,
+  warn = false,
+}: {
+  label: string;
+  value: string;
+  ok: boolean;
+  warn?: boolean;
+}) {
+  const color = ok ? "text-primary" : warn ? "text-amber-400" : "text-red-400";
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="text-muted-foreground uppercase tracking-wider">{label}</span>
+      <span className={`font-bold ${color}`}>{value}</span>
+    </span>
   );
 }

@@ -58,9 +58,10 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ✅ 40. **Uyarı geçmişi yok.** Yolcu ekranı arkadayken uyarıyı kaçırırsa iz kalmıyor; "son uyarılar" listesi + saat.
 
 ## E. Veri / batarya (YAPILACAKLAR2'den devreden)
-- ⬜ 41. Tüm `DayLog` JSON'u her değişimde tüm yolculara gönderiliyor (`driver.tsx:323`) — delta gönderilmeli.
-- ⬜ 42. Yayın periyodu sabit; duruşta seyrekleşmiyor.
-- ⬜ 43. IndexedDB yazımı `applyDay` içinde her fix'te — toplu (batch) yazım.
+- ✅ 41. Tüm `DayLog` JSON'u her değişimde gönderiliyordu → artık yalnızca değişen alanlar (`journey-delta`) gidiyor; tam paket sadece ilk bağlantıda.
+- ✅ 42. Yayın periyodu duruşta kademeli seyreliyor: hareket 1 sn · duruş 3 sn · 15 sn+ duruş 6 sn · 60 sn+ duruş 10 sn.
+- ✅ 43. IndexedDB yazımı toplu (5 sn'de bir); sekme gizlenince/kapanınca ve sefer bitişinde anında boşaltılıyor.
+
 
 ## F. Güvenlik / servis
 - ⬜ 44. **`DRIVER_PASSWORD = "ankara06"` istemci paketinde açık metin.** Herkes şoför paneline girip yayın kimliğini kapabilir ve sahte konum yayınlayabilir. Sunucu tarafı doğrulama / imzalı oturum tokenı gerekir.
@@ -69,18 +70,18 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ⬜ 47. **`getBattery` yalnızca Chrome'da var**; "kontak" otomatik başlatma iOS/Firefox'ta sessizce çalışmıyor, kullanıcıya bilgi verilmiyor.
 
 ## G. Kullanıcı deneyimi (üst seviye için)
-- ⬜ 48. **PWA/Service Worker yok**: tünelde/kapsama boşluğunda sayfa yenilenirse uygulama açılmıyor; offline kabuk + son bilinen konum önbelleği.
-- ⬜ 49. **Şoför için "yayın sağlığı" tek bakış paneli**: GPS ±m, fix yaşı, yolcu sayısı, TURN/röle durumu, radyo dinleyen sayısı — tek satırda.
-- ⬜ 50. **Yolcu ilk açılış deneyimi**: tek dokunuşla "sesi aç + bildirim izni + durak seç" onboarding; şu an izinler dağınık.
-- ⬜ 51. **Erişilebilirlik/okunurluk**: hız ve ETA sürüşte tek elle, güneş altında okunacak kadar büyük değil; gece modu ayrımı zayıf.
+- ✅ 48. **PWA/Service Worker yok**: tünelde/kapsama boşluğunda sayfa yenilenirse uygulama açılmıyor; offline kabuk + son bilinen konum önbelleği.
+- ✅ 49. **Şoför için "yayın sağlığı" tek bakış paneli**: GPS ±m, fix yaşı, yolcu sayısı, TURN/röle durumu, radyo dinleyen sayısı — tek satırda.
+- ✅ 50. **Yolcu ilk açılış deneyimi**: tek dokunuşla "sesi aç + bildirim izni + durak seç" onboarding; şu an izinler dağınık.
+- ✅ 51. **Erişilebilirlik/okunurluk**: hız ve ETA sürüşte tek elle, güneş altında okunacak kadar büyük değil; gece modu ayrımı zayıf.
 
 ## H. Şoför "çevrimdışı" görünme / yolcu yeniden deneme (yeni tespit – 11.08.2026)
-- ⬜ 52. **Yolcu bağlantıyı yalnızca bir kez deniyor.** Yolcu sayfayı şoför henüz açmadan açtığında `peer.connect(DRIVER_PEER_ID)` "peer-unavailable" hatası alıyor ve durum kalıcı "çevrimdışı" oluyor. Şoför sonradan girdiğinde yeniden deneme olmadığı için ancak sayfa yenilenirse bağlanıyor. Çözüm: `peer-unavailable` hatasında **sürekli yeniden deneme döngüsü** (3 sn → 5 sn → 10 sn üst sınırlı backoff, sonsuz; sekme gizliyken duraklat, geri dönünce anında tek deneme).
-- ⬜ 53. **Presence (varlık) kanalı yok.** Yolcu şoförün çevrimiçi olup olmadığını sadece bağlanmayı denemekten anlıyor. Çözüm: hafif bir "ilan" mekanizması — şoför açıkken 5 sn'de bir `driver-online` yayını (veya Cloud'da `is_live` satırı / Realtime presence). Yolcu bunu görünce hemen bağlanır.
-- ⬜ 54. **"Çevrimdışı" durumu ile "bağlantı kurulamıyor" ayrımı yok.** Yolcu ekranı üç ayrı durum göstermeli: *şoför yayında değil* · *yayında, bağlanılıyor (n. deneme)* · *bağlı*. Ayrıca "Tekrar dene" butonu ve "son deneme: 3 sn önce" bilgisi.
-- ⬜ 55. **Şoför tarafında `peer.destroy()` yapılmadığı için kimlik asılı kalıyor** (bkz. 13) → yolcu "çevrimiçi" sanıp veri alamıyor (zombie). Presence zaman aşımı (>15 sn paket yoksa çevrimdışı say) gerekli.
-- ⬜ 56. **Şoför kimliği değişirse yolcu haberi olmuyor** (12 ile birlikte): oturum kimliğine geçilirse yolcunun keşif kanalından yeni kimliği alması şart.
-- ⬜ 57. **`visibilitychange` / `online` olaylarında anında yeniden deneme yok.** Telefon uykudan kalkınca veya ağ döndüğünde yolcu 30+ sn boş ekran görüyor.
+- ✅ 52. **Yolcu bağlantıyı yalnızca bir kez deniyor.** Yolcu sayfayı şoför henüz açmadan açtığında `peer.connect(DRIVER_PEER_ID)` "peer-unavailable" hatası alıyor ve durum kalıcı "çevrimdışı" oluyor. Şoför sonradan girdiğinde yeniden deneme olmadığı için ancak sayfa yenilenirse bağlanıyor. Çözüm: `peer-unavailable` hatasında **sürekli yeniden deneme döngüsü** (3 sn → 5 sn → 10 sn üst sınırlı backoff, sonsuz; sekme gizliyken duraklat, geri dönünce anında tek deneme).
+- ✅ 53. **Presence (varlık) kanalı yok.** Yolcu şoförün çevrimiçi olup olmadığını sadece bağlanmayı denemekten anlıyor. Çözüm: hafif bir "ilan" mekanizması — şoför açıkken 5 sn'de bir `driver-online` yayını (veya Cloud'da `is_live` satırı / Realtime presence). Yolcu bunu görünce hemen bağlanır.
+- ✅ 54. **"Çevrimdışı" durumu ile "bağlantı kurulamıyor" ayrımı yok.** Yolcu ekranı üç ayrı durum göstermeli: *şoför yayında değil* · *yayında, bağlanılıyor (n. deneme)* · *bağlı*. Ayrıca "Tekrar dene" butonu ve "son deneme: 3 sn önce" bilgisi.
+- ✅ 55. **Şoför tarafında `peer.destroy()` yapılmadığı için kimlik asılı kalıyor** (bkz. 13) → yolcu "çevrimiçi" sanıp veri alamıyor (zombie). Presence zaman aşımı (>15 sn paket yoksa çevrimdışı say) gerekli.
+- 🟡 56. **Şoför kimliği değişirse yolcu haberi olmuyor** (12 ile birlikte): oturum kimliğine geçilirse yolcunun keşif kanalından yeni kimliği alması şart.
+- ✅ 57. **`visibilitychange` / `online` olaylarında anında yeniden deneme yok.** Telefon uykudan kalkınca veya ağ döndüğünde yolcu 30+ sn boş ekran görüyor.
 
 ## I. Uygulamayı "üst seviye" yapacak ek fikirler
 - ⬜ 58. **Canlı harita üzerinde servis rozeti**: aracın ikonu + yön oku + hız etiketi, durak pinlerinde "kalan süre" balonu.
@@ -134,3 +135,17 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
   - 38: Bildirim izni yoksa/iOS'ta tam ekran flaş + `alarmTone()`; dokununca kapanıyor.
   - 39: OSRM isteklerinde 7 sn zaman aşımı; başarısızsa rota mesafesi × ortalama hız ile "YEREL TAHMİN" etiketli ETA.
   - 40: Uyarı geçmişi localStorage'da (son 12), yolcu Uyarı sekmesinde saatli liste + temizle.
+- ✅ **H bölümü (52–55, 57) tamamlandı, 56 beklemede** — 12.08.2026
+  - 52: `peer-unavailable` hatasında sonsuz yakalama döngüsü; `waitingRetryDelay()` ile 3s → 5s → 10s (üst sınır), sekme gizliyken duraklıyor.
+  - 53: Presence kanıtı olarak gelen her paket (ping/position dâhil) zaman damgalanıyor; şoför açılır açılmaz yolcu kendiliğinden bağlanıyor.
+  - 54: Rozet üç durumu ayırıyor — *Şoför Yayında Değil* · *Bağlanıyor (n. deneme)* · *Canlı*; ayrıca "son deneme: N sn önce" ve **Tekrar dene** butonu.
+  - 55: `PRESENCE_TIMEOUT_MS = 15 sn`; bağlantı açık görünse de 15 sn paket yoksa zombie sayılıp kapatılıyor ve yeniden kuruluyor.
+  - 56: 🟡 Oturum kimliği keşfi #12 ile birlikte yapılacak (sabit kimlik korunuyor).
+  - 57: `visibilitychange` / `online` olayında anında tek deneme (uykudan kalkışta boş ekran yok).
+- ✅ **G bölümü (48–51) tamamlandı** — 12.08.2026
+  - 48: `public/sw.js` + `public/manifest.webmanifest` + `src/lib/pwa.ts` → çevrimdışı kabuk (tünelde sayfa yenilense de açılır, ana ekrana eklenebilir) ve son bilinen konum yerel önbelleği; yayın yokken "son bilinen konum / hız / saat" gösteriliyor.
+  - 49: Şoför panelinde tek satır **yayın sağlığı**: GPS ±m · fix yaşı · sinyal sunucusu · yolcu sayısı · röle (TURN) · radyo dinleyen · ekran kilidi. Ayrıca sinyal koparsa üst durum satırı "SİNYAL KOPTU · yeniden bağlanılıyor (n)" oluyor.
+  - **Yeni:** şoför tarafında `peer.on("disconnected")` → kademeli `peer.reconnect()`, 5 sn'lik nöbetçi ve `online/offline` olayları; ağ dönünce yayın kendini toparlıyor (önceden yalnızca sekme arka plandan dönünce deneniyordu).
+  - 50: İlk açılışta tek dokunuşlu kurulum: durak seçimi + ses + bildirim izni birlikte; seçim `localStorage`'da hatırlanıyor.
+  - 51: "Büyük Yazı" (sürüş/güneş) modu — ETA ve durak yazıları dev tipografiyle, tercih kalıcı.
+

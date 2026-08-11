@@ -14,14 +14,16 @@ function session(): MediaSessionLike | null {
   return s ?? null;
 }
 
-export function setNowPlaying(title: string | null, artist = "Acrob Servis Radyosu") {
+// Araç teybinde SADECE çalan parçanın adı görünsün: istasyon/uygulama adı
+// (ör. "Acrob Servis Radyosu") artist/album alanlarına yazılmaz.
+export function setNowPlaying(title: string | null) {
   const s = session();
   if (!s) return;
   const MM = (window as unknown as { MediaMetadata?: new (i: Record<string, unknown>) => unknown })
     .MediaMetadata;
   if (!MM) return;
   try {
-    s.metadata = title ? new MM({ title, artist, album: "Servis Takip" }) : null;
+    s.metadata = title ? new MM({ title }) : null;
   } catch {
     /* ignore */
   }

@@ -102,7 +102,6 @@ const CALIBRATION_MS = 4000;
 // Bulgu 10: bu hızın altı "duruş" sayılır (GPS hayalet hızı temizlenir)
 const IDLE_KMH = 3;
 
-
 export interface FixInput {
   lat: number;
   lng: number;
@@ -133,7 +132,6 @@ export interface FixResult {
   /** Uzun boşluk sonrası hız henüz oturmadı */
   calibrating: boolean;
 }
-
 
 function haversine(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   const R = 6371000;
@@ -253,7 +251,6 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   state.lastFix = fix;
   return { stats: next, speedKmh: state.smoothedKmh, accepted: true, calibrating: calibrating() };
 }
-
 
 /** Bulgu 13: GPS doğruluğunu kullanıcıya anlatan kısa etiket. */
 export function accuracyLabel(accuracy: number | null | undefined): {

@@ -2,26 +2,57 @@ import { usePassedStops, useTrimmedRoutePath } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
-import { PEER_OPTIONS, reconnectDelay, type LiveStatus } from "@/lib/peer-config";
+import {
+  PEER_OPTIONS,
+  reconnectDelay,
+  CONN_OPEN_TIMEOUT_MS,
+  watchIceState,
+  tryIceRestart,
+  type LiveStatus,
+  type PingPayload,
+  type PongPayload,
+} from "@/lib/peer-config";
 import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { getStops, type Stop } from "@/lib/stops";
 import { getRoute, getRouteEta, formatEta, type RouteEtaResult } from "@/lib/routing";
-import { blobToBase64, pickRecorderMime, speak, type VoiceAlertPayload } from "@/lib/voice-alert";
+import {
+  blobToBase64,
+  onSpeaking,
+  pickRecorderMime,
+  speak,
+  type VoiceAlertPayload,
+} from "@/lib/voice-alert";
+import { resumeSharedAudio } from "@/lib/audio-context";
 import { announceText, type BrakeEventPayload, type StopAnnouncePayload } from "@/lib/announce";
 import {
   alarmTone,
   ensureNotificationPermission,
-  ingestDistance,
+  ingestApproach,
   initialApproachState,
   isApproachAlertOn,
+  loadAlertHistory,
+  pushAlertHistory,
+  clearAlertHistory,
+  needsVisualFallback,
+  stageLabel,
   notify,
   setApproachAlertOn,
   vibrate,
+  type AlertHistoryItem,
   type ApproachStage,
 } from "@/lib/approach-alert";
+import {
+  effectiveDistanceM,
+  etaSeconds,
+  headingAgrees,
+  ingestTrend,
+  initialTrendState,
+} from "@/lib/route-progress";
 
-import type { RadioStatePayload } from "@/lib/radio";
+import type { RadioAckPayload, RadioRequestPayload, RadioStatePayload } from "@/lib/radio";
+import { setNowPlaying, setPlaybackState } from "@/lib/media-session";
+import type { MediaConnection } from "peerjs";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
 import type { DayLog, JourneyPayload } from "@/lib/journey-log";
@@ -60,8 +91,16 @@ interface DriverPayload {
   maxSpeedKmh?: number;
   heading: number | null;
   plate: string;
+  /** YAPILACAKLAR3 #1/#2: fix zamanı, paket yaşı ve kalibrasyon durumu */
+  fixTs?: number;
+  ageMs?: number;
+  calibrating?: boolean;
+  accuracyM?: number;
   ts: number;
 }
+
+/** #2: bu yaştan sonra veri "bayat" sayılır, hız gösterilmez. */
+const STALE_MS = 10000;
 
 interface DriverRoutePayload {
   type: "route";
@@ -154,6 +193,23 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [status, setStatus] = useState<LiveStatus>("idle");
   const [retryCount, setRetryCount] = useState(0);
   const [driver, setDriver] = useState<DriverPayload | null>(null);
+  // #2: verinin kaç saniyedir güncellenmediğini göstermek için
+  const [driverRecvAt, setDriverRecvAt] = useState<number>(0);
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+
+  // #2: verinin yaşı = şoförün fix yaşı + bize ulaştıktan sonra geçen süre
+  const dataAgeMs = driver
+    ? (driver.ageMs ?? 0) + Math.max(0, nowTick - (driverRecvAt || nowTick))
+    : 0;
+  const dataAgeSec = Math.round(dataAgeMs / 1000);
+  const dataStale = dataAgeMs > STALE_MS;
+
+  // #2: saniyede bir tazelik sayacı
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const [eta, setEta] = useState<RouteEtaResult | null>(null);
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
   const [radio, setRadio] = useState<RadioStatePayload | null>(null);
@@ -161,6 +217,19 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [radioOn, setRadioOn] = useState(false);
   const [radioVolume, setRadioVolume] = useState(0.9);
   const radioAudioRef = useRef<HTMLAudioElement | null>(null);
+  // YAPILACAKLAR3 #22/#24/#25: tek aktif çağrı, akış takibi ve tekrar isteme
+  const radioCallRef = useRef<MediaConnection | null>(null);
+  // Gelen ses akışı: <audio> henüz DOM'da olmasa bile saklanır, mount olunca bağlanır.
+  const radioStreamRef = useRef<MediaStream | null>(null);
+  const [radioStreamOk, setRadioStreamOk] = useState(false);
+  const radioStreamOkRef = useRef(false);
+  radioStreamOkRef.current = radioStreamOk;
+  const radioOnRef = useRef(false);
+  radioOnRef.current = radioOn;
+  // Yolcu bir kez sesi açmayı seçtiyse artık aç/kapat düğmesi gösterilir.
+  const [radioTouched, setRadioTouched] = useState(false);
+  const radioLiveRef = useRef(false);
+  const duckRef = useRef(false);
   // --- 10. madde: durak anonsu + ani fren (şoförden canlı gelir) ---
   const [announce, setAnnounce] = useState<StopAnnouncePayload | null>(null);
   const [brakes, setBrakes] = useState<BrakeEventPayload[]>([]);
@@ -171,6 +240,9 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const connRef = useRef<DataConnection | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
+  // YAPILACAKLAR3 #19: sekme gizliyken bekleyen deneme + görünür olunca anında bağlanma
+  const connectRef = useRef<(() => void) | null>(null);
+  const pendingRetryRef = useRef(false);
 
   const stops = driverStops ?? baseStops;
 
@@ -209,15 +281,52 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     const peer = new Peer({ ...PEER_OPTIONS });
     peerRef.current = peer;
+    let openTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopIce: (() => void) | null = null;
+
+    const cleanupConn = () => {
+      if (openTimer) clearTimeout(openTimer);
+      openTimer = null;
+      stopIce?.();
+      stopIce = null;
+    };
 
     const connect = () => {
+      cleanupConn();
       setStatus((s: LiveStatus) => (s === "waiting" ? "waiting" : "connecting"));
       const conn = peer.connect(DRIVER_PEER_ID, { reliable: true });
       connRef.current = conn;
+      // #15: 10 sn içinde "open" gelmezse bağlantı ölü sayılır, yeniden denenir
+      openTimer = setTimeout(() => {
+        if (!conn.open) {
+          try {
+            conn.close();
+          } catch {
+            /* ignore */
+          }
+          setStatus("offline");
+          scheduleReconnect();
+        }
+      }, CONN_OPEN_TIMEOUT_MS);
       conn.on("open", () => {
+        if (openTimer) clearTimeout(openTimer);
+        openTimer = null;
         attemptRef.current = 0;
         setRetryCount(0);
         setStatus("connected");
+        // #16: zombie bağlantı (açık ama veri akmıyor) tespiti
+        stopIce?.();
+        stopIce = watchIceState(conn, () => {
+          if (!tryIceRestart(conn)) {
+            try {
+              conn.close();
+            } catch {
+              /* ignore */
+            }
+            setStatus("offline");
+            scheduleReconnect();
+          }
+        });
       });
       conn.on("data", (data) => {
         const p = data as
@@ -226,9 +335,21 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           | RadioStatePayload
           | JourneyPayload
           | StopAnnouncePayload
-          | BrakeEventPayload;
-        if (p?.type === "position") setDriver(p as DriverPayload);
-        else if (p?.type === "radio") setRadio(p as RadioStatePayload);
+          | BrakeEventPayload
+          | PingPayload;
+        // #17: şoförün kalp atışına pong ile cevap ver
+        if (p?.type === "ping") {
+          try {
+            conn.send({ type: "pong", ts: Date.now() } as PongPayload);
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        if (p?.type === "position") {
+          setDriver(p as DriverPayload);
+          setDriverRecvAt(Date.now());
+        } else if (p?.type === "radio") setRadio(p as RadioStatePayload);
         else if (p?.type === "journey") setDay((p as JourneyPayload).day);
         else if (p?.type === "announce") {
           const a = p as StopAnnouncePayload;
@@ -247,42 +368,82 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         }
       });
       conn.on("close", () => {
+        cleanupConn();
         setStatus("offline");
         scheduleReconnect();
       });
       conn.on("error", () => {
+        cleanupConn();
         setStatus("offline");
         scheduleReconnect();
       });
     };
+
+    connectRef.current = connect;
 
     const scheduleReconnect = () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       const attempt = attemptRef.current++;
       setRetryCount(attempt + 1);
+      // #19: sekme gizliyken yeniden deneme duraklatılır (batarya);
+      // görünür olunca anında tek deneme yapılır.
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        pendingRetryRef.current = true;
+        return;
+      }
       reconnectTimerRef.current = setTimeout(() => {
         if (peerRef.current && !peerRef.current.destroyed) connect();
       }, reconnectDelay(attempt));
     };
 
+    // #14: signaling sunucusu düşerse peer.connect() sessizce başarısız olur
+    peer.on("disconnected", () => {
+      setStatus((s) => (s === "connected" ? "offline" : s));
+      try {
+        if (!peer.destroyed) peer.reconnect();
+      } catch {
+        /* ignore */
+      }
+    });
+
     peer.on("open", connect);
 
     // Şoförün radyo yayını (WebRTC media call)
     peer.on("call", (call) => {
+      // #22: yeni çağrı gelince eskisini kapat (çift ses / eko biter)
+      const prev = radioCallRef.current;
+      if (prev && prev !== call) {
+        try {
+          prev.close();
+        } catch {
+          /* ignore */
+        }
+      }
+      radioCallRef.current = call;
       try {
         call.answer();
       } catch {
         /* ignore */
       }
       call.on("stream", (stream) => {
+        radioStreamRef.current = stream;
+        setRadioStreamOk(true);
         const el = radioAudioRef.current;
         if (!el) return;
         el.srcObject = stream;
-        el.volume = radioVolume;
         void el.play().catch(() => {
           /* kullanıcı "Sesi Aç"a basınca çalacak */
         });
       });
+      const lost = () => {
+        if (radioCallRef.current === call) {
+          radioCallRef.current = null;
+          radioStreamRef.current = null;
+          setRadioStreamOk(false);
+        }
+      };
+      call.on("close", lost);
+      call.on("error", lost);
     });
 
     peer.on("error", (err) => {
@@ -295,20 +456,131 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
     return () => {
       attemptRef.current = 0;
+      cleanupConn();
+      connectRef.current = null;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       connRef.current?.close();
       peer.destroy();
     };
   }, []);
 
+  // YAPILACAKLAR3 #19: sekme geri gelince / ağ dönünce anında tek deneme
   useEffect(() => {
+    const retryNow = () => {
+      const conn = connRef.current;
+      if (conn?.open) return;
+      pendingRetryRef.current = false;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      const peer = peerRef.current;
+      if (!peer || peer.destroyed) return;
+      if (peer.disconnected) {
+        try {
+          peer.reconnect();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      connectRef.current?.();
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") retryNow();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("online", retryNow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("online", retryNow);
+    };
+  }, []);
+
+  const volumeRef = useRef(radioVolume);
+  volumeRef.current = radioVolume;
+
+  // #29: anons/TTS konuşurken radyo kısılır (üst üste binme biter)
+  const applyRadioVolume = () => {
     const el = radioAudioRef.current;
-    if (el) {
-      el.volume = radioVolume;
-      el.muted = !radioOn;
-      if (radioOn) void el.play().catch(() => undefined);
+    if (!el) return;
+    // Sekme değişimlerinde akış kopmasın: akış varsa her zaman yeniden bağla.
+    const stream = radioStreamRef.current;
+    if (stream && el.srcObject !== stream) el.srcObject = stream;
+    el.volume = volumeRef.current * (duckRef.current ? 0.12 : 1);
+    el.muted = !radioOnRef.current;
+    if (radioOnRef.current) void el.play().catch(() => undefined);
+  };
+
+  useEffect(() => {
+    applyRadioVolume();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [radioOn, radioVolume, radioStreamOk]);
+
+  // Araç teybi / Bluetooth ekranında çalan parça adı görünsün
+  useEffect(() => {
+    const live = Boolean(radio?.playing) && radioOn;
+    setNowPlaying(live ? (radio?.title ?? "Servis Radyosu") : null);
+    setPlaybackState(live);
+  }, [radio?.playing, radio?.title, radioOn]);
+
+  useEffect(
+    () =>
+      onSpeaking((speaking) => {
+        duckRef.current = speaking;
+        applyRadioVolume();
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  // #24/#27: ses akışı doğrulaması + gelmiyorsa şoförden yeniden çağrı isteği
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const conn = connRef.current;
+      if (!conn?.open) return;
+      try {
+        if (radioStreamOkRef.current) {
+          conn.send({
+            type: "audio-ok",
+            stream: true,
+            listening: radioOnRef.current,
+            ts: Date.now(),
+          } as RadioAckPayload);
+        } else if (radioLiveRef.current) {
+          conn.send({ type: "radio-req", ts: Date.now() } as RadioRequestPayload);
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(
+    () => () => {
+      try {
+        radioCallRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+    },
+    [],
+  );
+
+  const enableRadio = () => {
+    resumeSharedAudio();
+    setRadioOn(true);
+    radioOnRef.current = true;
+    setRadioTouched(true);
+    applyRadioVolume();
+    // Ses akışı henüz yoksa şoförden hemen çağrı iste (#24)
+    const conn = connRef.current;
+    if (conn?.open && !radioStreamOkRef.current) {
+      try {
+        conn.send({ type: "radio-req", ts: Date.now() } as RadioRequestPayload);
+      } catch {
+        /* ignore */
+      }
     }
-  }, [radioOn, radioVolume]);
+  };
 
   // ETA hesabı - konum ve durak değişince
   const selectedStop = useMemo(
@@ -323,8 +595,26 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     }
     let cancelled = false;
     // Güzergâha sadık: aradaki tüm duraklardan geçerek + bekleme süreleriyle
-    getRouteEta({ lat: driver.lat, lng: driver.lng }, stops, selectedStop.id).then((r) => {
-      if (!cancelled) setEta(r);
+    const from = { lat: driver.lat, lng: driver.lng };
+    getRouteEta(from, stops, selectedStop.id).then((r) => {
+      if (cancelled) return;
+      if (r) {
+        setEtaLocal(false);
+        setEta(r);
+        return;
+      }
+      // #39: OSRM yoksa yerel yedek — güzergâh çizgisi mesafesi × son hız
+      const distanceM = effectiveDistanceM(routePath, from, {
+        lat: selectedStop.lat,
+        lng: selectedStop.lng,
+      });
+      setEtaLocal(true);
+      setEta({
+        distanceM,
+        durationS: etaSeconds(distanceM, driver.speedKmh ?? 0, driver.avgSpeedKmh),
+        viaStops: 0,
+        dwellS: 0,
+      });
     });
     return () => {
       cancelled = true;
@@ -333,39 +623,84 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   const etaText = eta ? formatEta(eta.durationS) : null;
 
-  // --- 9. madde: "Servis Geliyor" uyarısı (500 m titreşim, 200 m alarm + bildirim) ---
+  // --- 9. madde + D bölümü: ETA tabanlı "Servis Geliyor" uyarısı (5 dk / 2 dk / kapıda) ---
   const [alertOn, setAlertOn] = useState(true);
   const [notifyReady, setNotifyReady] = useState(false);
   const [approachStage, setApproachStage] = useState<ApproachStage>("far");
   const approachRef = useRef(initialApproachState());
+  const [etaLocal, setEtaLocal] = useState(false);
+  const alertTrendRef = useRef(initialTrendState());
+  const [alertHistory, setAlertHistory] = useState<AlertHistoryItem[]>([]);
+  const [flash, setFlash] = useState<{ title: string; body: string } | null>(null);
 
   useEffect(() => {
     setAlertOn(isApproachAlertOn());
+    setAlertHistory(loadAlertHistory());
     if (typeof Notification !== "undefined") setNotifyReady(Notification.permission === "granted");
   }, []);
 
   // Durak değişince eşikler sıfırlanır
   useEffect(() => {
     approachRef.current = initialApproachState();
+    alertTrendRef.current = initialTrendState();
     setApproachStage("far");
   }, [selectedStopId]);
 
   useEffect(() => {
     const d = eta?.distanceM;
     if (d == null || !selectedStop) return;
-    const ev = ingestDistance(approachRef.current, d);
+    // #34: servis uzaklaşıyorsa ya da ters yöne gidiyorsa uyarı çıkmaz
+    const approaching =
+      ingestTrend(alertTrendRef.current, selectedStop.id, d) &&
+      (!driver ||
+        headingAgrees(
+          driver.heading,
+          { lat: driver.lat, lng: driver.lng },
+          { lat: selectedStop.lat, lng: selectedStop.lng },
+          driver.speedKmh ?? 0,
+        ));
+    const ev = ingestApproach(approachRef.current, {
+      distanceM: d,
+      etaS: eta?.durationS ?? null,
+      approaching,
+    });
     setApproachStage(ev.stage);
     if (!ev.changed || !alertOn) return;
-    if (ev.stage === "near") {
-      vibrate([300, 150, 300]);
-      notify("Servis yaklaşıyor", `${selectedStop.name} durağına 500 metre kaldı.`);
-    } else if (ev.stage === "arriving") {
-      vibrate([600, 200, 600, 200, 600]);
+
+    const mins = Math.max(1, Math.round((eta?.durationS ?? 0) / 60));
+    const title =
+      ev.stage === "door"
+        ? "Servis kapıda!"
+        : ev.stage === "arriving"
+          ? "Servis geliyor!"
+          : "Servis yaklaşıyor";
+    const body =
+      ev.stage === "door"
+        ? `${selectedStop.name} durağına vardı — hemen çık.`
+        : `${selectedStop.name} durağına yaklaşık ${mins} dakika kaldı.`;
+
+    if (ev.stage === "near") vibrate([300, 150, 300]);
+    else vibrate([600, 200, 600, 200, 600]);
+    if (ev.stage !== "near") {
       alarmTone();
-      speak(`Servis geliyor. ${selectedStop.name} durağına 200 metre kaldı.`);
-      notify("Servis geliyor!", `${selectedStop.name} durağına 200 metre kaldı.`);
+      speak(`${title} ${body}`);
     }
-  }, [eta?.distanceM, selectedStop?.id, alertOn]);
+    notify(title, body);
+    // #38: iOS'ta bildirim/titreşim yok — tam ekran flaş + ses yedeği
+    if (needsVisualFallback()) {
+      setFlash({ title, body });
+      window.setTimeout(() => setFlash(null), 8000);
+    }
+    // #40: uyarı geçmişi
+    setAlertHistory((prev) =>
+      pushAlertHistory(prev, {
+        stage: ev.stage,
+        stopName: selectedStop.name,
+        text: body,
+        ts: Date.now(),
+      }),
+    );
+  }, [eta?.distanceM, eta?.durationS, selectedStop?.id, alertOn]);
 
   // --- Sekmeli yolcu paneli (kaydırmalı) ---
   const TABS = [
@@ -394,6 +729,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   };
 
   const radioLive = Boolean(radio?.playing);
+  radioLiveRef.current = radioLive;
 
   const takipTab = (
     <div className="flex flex-col gap-4">
@@ -461,19 +797,34 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
       {driver && status === "connected" && (
         <div className="panel p-5">
-          <div className="hud-label mb-3">Canlı Telemetri</div>
+          <div className="hud-label mb-3 flex items-center justify-between gap-2">
+            <span>Canlı Telemetri</span>
+            <span className={dataStale ? "text-amber-400" : "text-muted-foreground"}>
+              {dataAgeSec <= 1 ? "şimdi güncellendi" : `${dataAgeSec} sn önce güncellendi`}
+            </span>
+          </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <div className="hud-label mb-1">Hız</div>
-              <div className="text-3xl font-mono font-bold text-primary">
-                {Math.round(driver.speedKmh)}
+              <div
+                className={`text-3xl font-mono font-bold text-primary ${dataStale ? "opacity-40" : ""}`}
+              >
+                {dataStale ? "—" : Math.round(driver.speedKmh)}
                 <span className="text-xs text-muted-foreground ml-1">km/s</span>
               </div>
             </div>
             <div>
               <div className="hud-label mb-1">Durum</div>
-              <div className="text-lg font-semibold text-foreground">
-                {driver.speedKmh > 3 ? "Hareket Halinde" : "Duruyor"}
+              <div
+                className={`text-lg font-semibold text-foreground ${dataStale ? "opacity-60" : ""}`}
+              >
+                {dataStale
+                  ? "Veri bekleniyor"
+                  : driver.calibrating
+                    ? "Kalibre ediliyor…"
+                    : driver.speedKmh > 3
+                      ? "Hareket Halinde"
+                      : "Duruyor"}
               </div>
             </div>
           </div>
@@ -530,17 +881,32 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           {radioLive && (
             <div className="text-[11px] font-mono font-bold text-live live-blink mt-1">YAYINDA</div>
           )}
+          <div className="text-[11px] font-mono text-muted-foreground mt-1">
+            {radioStreamOk ? "SES AKIŞI BAĞLI" : radioLive ? "SES AKIŞI BEKLENİYOR…" : "—"}
+          </div>
         </div>
-        <button
-          onClick={() => setRadioOn((v) => !v)}
-          className={`mt-3 w-full py-3 rounded-md font-bold tracking-wide transition ${
-            radioOn
-              ? "bg-primary text-primary-foreground hover:bg-primary/90"
-              : "border border-border hover:bg-muted/50"
-          }`}
-        >
-          {radioOn ? "🔊 Radyo Açık" : "🔈 Radyoyu Aç"}
-        </button>
+        {/* #25: iOS/Safari otomatik oynatma engeli — kalıcı ve belirgin çağrı */}
+        {radioLive && !radioTouched && (
+          <button
+            onClick={enableRadio}
+            className="mt-3 w-full py-4 rounded-md bg-primary text-primary-foreground font-bold tracking-wide animate-pulse"
+          >
+            🔊 Yayın var — sesi açmak için dokun
+          </button>
+        )}
+        {/* Sesi bir kez açtıktan sonra kontrol yolcuda: aç / kapat */}
+        {(radioTouched || !radioLive) && (
+          <button
+            onClick={() => (radioOn ? setRadioOn(false) : enableRadio())}
+            className={`mt-3 w-full py-3 rounded-md font-bold tracking-wide transition ${
+              radioOn
+                ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                : "border border-border hover:bg-muted/50"
+            }`}
+          >
+            {radioOn ? "🔊 Sesi Kapat" : "🔈 Sesi Aç"}
+          </button>
+        )}
         <div className="flex items-center gap-3 mt-3">
           <span className="hud-label">Ses</span>
           <input
@@ -561,7 +927,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           Şoför müzik yayınına başladığında ses otomatik gelir; tarayıcı izni için bir kez "Radyoyu
           Aç"a dokunman gerekebilir.
         </p>
-        <audio ref={radioAudioRef} autoPlay playsInline className="hidden" />
       </div>
     </div>
   );
@@ -603,19 +968,22 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           </button>
         </div>
         <div className="text-sm">
-          {approachStage === "arriving" ? (
-            <span className="text-primary font-bold">🚨 Servis geliyor — 200 m içinde!</span>
+          {approachStage === "door" ? (
+            <span className="text-primary font-bold">🚨 Servis kapıda — hemen çık!</span>
+          ) : approachStage === "arriving" ? (
+            <span className="text-primary font-bold">🚨 Servis geliyor — 2 dakika içinde!</span>
           ) : approachStage === "near" ? (
-            <span className="font-semibold">📳 Servis yaklaşıyor — 500 m içinde</span>
+            <span className="font-semibold">📳 Servis yaklaşıyor — yaklaşık 5 dakika</span>
           ) : (
             <span className="text-muted-foreground">
-              500 m kala titreşim, 200 m kala alarm + bildirim gönderilir.
+              5 dakika kala titreşim, 2 dakika kala alarm + bildirim, kapıda son uyarı.
             </span>
           )}
         </div>
         {eta && (
           <div className="text-[11px] font-mono text-muted-foreground mt-1">
-            DURAĞA KALAN: {Math.round(eta.distanceM)} M
+            DURAĞA KALAN: {Math.round(eta.distanceM)} M · {formatEta(eta.durationS).text}
+            {etaLocal ? " (YEREL TAHMİN)" : ""}
           </div>
         )}
         {!notifyReady && (
@@ -626,6 +994,39 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             🔔 Bildirim İznini Ver
           </button>
         )}
+        <div className="mt-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="hud-label">Son Uyarılar</div>
+            {alertHistory.length > 0 && (
+              <button
+                onClick={() => setAlertHistory(clearAlertHistory())}
+                className="text-[11px] text-muted-foreground hover:text-primary"
+              >
+                temizle
+              </button>
+            )}
+          </div>
+          {alertHistory.length === 0 ? (
+            <div className="text-xs text-muted-foreground">
+              Henüz uyarı yok. Uyarılar burada saatiyle listelenir.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
+              {alertHistory.map((h) => (
+                <div
+                  key={h.ts}
+                  className="flex items-center gap-2 px-3 py-2 rounded-md border border-border text-xs"
+                >
+                  <span className="font-bold">{stageLabel(h.stage)}</span>
+                  <span className="flex-1 truncate text-muted-foreground">{h.text}</span>
+                  <span className="font-mono text-[10px]">
+                    {new Date(h.ts).toLocaleTimeString("tr-TR")}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="panel p-5">
@@ -759,6 +1160,23 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   return (
     <div className="min-h-screen flex flex-col">
       <Header right={<DataSheet day={day} onReset={() => setDay(null)} />} />
+
+      {/* Sekme değiştirince radyo susmasın: ses öğesi her zaman DOM'da kalır. */}
+      <audio ref={radioAudioRef} autoPlay playsInline className="hidden" />
+
+      {/* #38: bildirim/titreşim olmayan cihazlarda (iOS) tam ekran görsel uyarı */}
+      {flash && (
+        <button
+          onClick={() => setFlash(null)}
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-primary text-primary-foreground px-6 text-center animate-pulse"
+          aria-live="assertive"
+        >
+          <span className="text-5xl">🚨</span>
+          <span className="text-2xl font-black">{flash.title}</span>
+          <span className="text-base font-semibold">{flash.body}</span>
+          <span className="text-xs opacity-80 mt-2">kapatmak için dokun</span>
+        </button>
+      )}
 
       <main
         className="flex-1 w-full max-w-3xl mx-auto p-4 pb-28"

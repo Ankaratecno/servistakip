@@ -3,7 +3,18 @@ import { usePassedStops, useTrimmedRoutePath } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
-import { PEER_OPTIONS, reconnectDelay } from "@/lib/peer-config";
+import {
+  PEER_OPTIONS,
+  reconnectDelay,
+  PING_INTERVAL_MS,
+  PONG_TIMEOUT_MS,
+  watchIceState,
+  tryIceRestart,
+  checkTurnReachable,
+  type RelayStatus,
+  type PingPayload,
+  type PongPayload,
+} from "@/lib/peer-config";
 import { isWakeLockSupported, keepScreenAwake, releaseScreenAwake } from "@/lib/wake-lock";
 import { ClientOnly } from "@/components/ClientOnly";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
@@ -12,6 +23,15 @@ import { getStops, type Stop } from "@/lib/stops";
 import { getRoute } from "@/lib/routing";
 import { beep, playBase64Audio, speak, type VoiceAlertPayload } from "@/lib/voice-alert";
 import type { RadioStatePayload } from "@/lib/radio";
+import type { RadioAckPayload, RadioRequestPayload } from "@/lib/radio";
+import {
+  audioStats,
+  callPeer,
+  clearCalls,
+  forgetPeer,
+  markAudioOk,
+  reconcileCalls,
+} from "@/lib/radio-calls";
 import {
   announceText,
   brakeLevel,
@@ -19,10 +39,20 @@ import {
   gpsBrakeG,
   ingestStopDistance,
   initialAnnounceState,
+  resetAnnounce,
   startBrakeWatch,
   type BrakeEventPayload,
   type StopAnnouncePayload,
 } from "@/lib/announce";
+import {
+  announceDistanceM,
+  effectiveDistanceM,
+  etaSeconds,
+  headingAgrees,
+  ingestTrend,
+  initialTrendState,
+  nextStop as pickNextStop,
+} from "@/lib/route-progress";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
 import {
@@ -141,6 +171,24 @@ function DriverGate() {
   );
 }
 
+/** Yolculara giden canlı konum paketi (YAPILACAKLAR3 #1/#2: fixTs + ageMs). */
+interface PositionPayload {
+  type: "position";
+  lat: number;
+  lng: number;
+  speedKmh: number;
+  avgSpeedKmh: number;
+  totalKm: number;
+  maxSpeedKmh: number;
+  heading: number | null;
+  plate: string;
+  accuracyM: number;
+  calibrating: boolean;
+  fixTs: number;
+  ageMs: number;
+  ts: number;
+}
+
 function DriverApp() {
   const [plate] = useState(SERVICE_INFO.plate);
   const [running, setRunning] = useState(false);
@@ -192,6 +240,19 @@ function DriverApp() {
   const connectionsRef = useRef<Set<DataConnection>>(new Set());
   const watchIdRef = useRef<number | null>(null);
   const radioStreamRef = useRef<MediaStream | null>(null);
+  // YAPILACAKLAR3 #1/#5/#10: kalp atışı, fix watchdog'u ve düşük hassasiyet yedeği
+  const lastFixTsRef = useRef<number>(0);
+  const gpsRetryRef = useRef(0);
+  const lowAccuracyRef = useRef(false);
+  const [fixAgeMs, setFixAgeMs] = useState<number | null>(null);
+  const [calibrating, setCalibrating] = useState(false);
+  // YAPILACAKLAR3 #16/#17/#18: ICE izleme, pong takibi ve röle (TURN) durumu
+  const lastPongRef = useRef<Map<string, number>>(new Map());
+  const iceStopRef = useRef<Map<string, () => void>>(new Map());
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>("unknown");
+  const lastBroadcastRef = useRef<number>(0);
+  // YAPILACAKLAR3 #27: radyo yayınını gerçekten alan / dinleyen yolcu sayısı
+  const [radioAudio, setRadioAudio] = useState({ receiving: 0, listening: 0 });
 
   // Rota noktaları dahil tüm liste (şoför her noktayı başlangıç seçebilir / atlayabilir)
   const realStops = allStops;
@@ -220,6 +281,16 @@ function DriverApp() {
   const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
   // 17. madde: rota kırpma artık throttle'lı ve son indeksten devam ediyor
   const activeRoutePath = useTrimmedRoutePath(routePath, busPos);
+  // D bölümü (#32/#36/#37): yol mesafesi + sıradaki durak + geçilince kilit sıfırlama
+  const passedRef = useRef<Set<string>>(new Set());
+  passedRef.current = passedIds;
+  const routePathRef = useRef<[number, number][] | null>(null);
+  routePathRef.current = routePath;
+  const trendRef = useRef(initialTrendState());
+  useEffect(() => {
+    // #36: anons kilidi mesafeye değil "durak geçildi" olayına bağlı
+    passedIds.forEach((id) => resetAnnounce(announceStateRef.current, id));
+  }, [passedIds]);
 
   // 15. madde: son geçilen durak kaydı + kopma sonrası devam
   const [resume, setResume] = useState<ResumePoint | null>(null);
@@ -382,6 +453,157 @@ function DriverApp() {
     });
   }, []);
 
+  const handleGpsPosition = (pos: GeolocationPosition) => {
+    lastFixTsRef.current = Date.now();
+    gpsRetryRef.current = 0;
+    setPosition(pos);
+    setGpsWarn(null);
+    // --- Filtrelenmiş, kalıcı sürüş istatistikleri (IndexedDB) ---
+    const now = pos.timestamp || Date.now();
+    const gpsSpeed = pos.coords.speed != null ? Math.max(0, pos.coords.speed * 3.6) : null;
+    const res = ingestFix(statsRef.current, filterRef.current, {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      ts: now,
+      accuracy: pos.coords.accuracy,
+      gpsSpeedKmh: gpsSpeed,
+    });
+    setLiveSpeed(res.speedKmh);
+    // 10.2 GPS yedeği: ivmeölçer yoksa hız düşüşünden ani fren çıkar
+    const prevSpeed = brakePrevRef.current;
+    if (!motionReadyRef.current && prevSpeed) {
+      const gB = gpsBrakeG(prevSpeed.kmh, res.speedKmh, (now - prevSpeed.ts) / 1000);
+      if (gB > 0) registerBrake(gB, "gps");
+    }
+    brakePrevRef.current = { kmh: res.speedKmh, ts: now };
+    // Kontak API'si olmayan cihazlarda hareket/duruş yedeği
+    if (res.speedKmh > 5) {
+      lastIdleTsRef.current = now;
+      applyDay((d) => openSession(d, now));
+    } else if (now - lastIdleTsRef.current > 180000 && lastIdleTsRef.current > 0) {
+      applyDay((d) => closeSession(d, now));
+    }
+    // Durak varış saatleri (100 m yakınlık, gün içinde tek kayıt)
+    const here = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    stopsRef.current
+      .filter((s) => s.kind === "stop")
+      .forEach((s) => {
+        const dm = distanceM(here, { lat: s.lat, lng: s.lng });
+        if (dm <= ARRIVAL_RADIUS_M) applyDay((d) => recordArrival(d, s.id, s.name, now));
+      });
+
+    // 10.1 + D bölümü: anons yalnızca SIRADAKİ durak için, güzergâh (yol)
+    // mesafesine ve hıza göre dinamik eşikle, yaklaşma yönü doğrulanarak yapılır.
+    const target = pickNextStop(stopsRef.current, passedRef.current);
+    if (target) {
+      const tgt = { lat: target.lat, lng: target.lng };
+      const dm = effectiveDistanceM(routePathRef.current, here, tgt);
+      const avgKmh = avgSpeedKmh(statsRef.current);
+      const approaching =
+        ingestTrend(trendRef.current, target.id, dm) &&
+        headingAgrees(pos.coords.heading, here, tgt, res.speedKmh);
+      const thresholdM = announceDistanceM(res.speedKmh, avgKmh);
+      const etaS = etaSeconds(dm, res.speedKmh, avgKmh);
+      if (approaching && ingestStopDistance(announceStateRef.current, target.id, dm, thresholdM)) {
+        const payload: StopAnnouncePayload = {
+          type: "announce",
+          stopId: target.id,
+          stopName: target.name,
+          distanceM: Math.round(dm),
+          etaS: Math.round(etaS),
+          ts: Date.now(),
+        };
+        setLastAnnounce(payload);
+        broadcastEvent(payload);
+        if (announceOnRef.current) speak(announceText(target.name, etaS));
+      }
+    }
+
+    if (res.accepted) {
+      // 8. madde: günlük mesafe ve fiili hareket süresi
+      const dMeters = res.stats.totalMeters - statsRef.current.totalMeters;
+      const dSeconds = res.stats.movingSeconds - statsRef.current.movingSeconds;
+      if (dMeters > 0 && dSeconds > 0 && res.speedKmh > 5) {
+        applyDay((d) => addDriving(d, dMeters, dSeconds));
+      }
+      statsRef.current = res.stats;
+      setStats(res.stats);
+      // Yazmayı seyrekleştir (IndexedDB'yi yormamak için ~5 sn)
+      if (now - lastSaveRef.current > 5000) {
+        lastSaveRef.current = now;
+        void saveStats(res.stats);
+      }
+    }
+
+    setCalibrating(res.calibrating);
+    const payload = {
+      type: "position" as const,
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      speedKmh: res.speedKmh,
+      avgSpeedKmh: avgSpeedKmh(statsRef.current),
+      totalKm: statsRef.current.totalMeters / 1000,
+      maxSpeedKmh: statsRef.current.maxSpeedKmh,
+      heading: pos.coords.heading,
+      plate: SERVICE_INFO.plate,
+      accuracyM: pos.coords.accuracy,
+      calibrating: res.calibrating,
+      // YAPILACAKLAR3 #1/#2: fix zamanı ve veri yaşı yolcuya gider
+      fixTs: now,
+      ageMs: 0,
+      ts: Date.now(),
+    };
+    watchLastRef.current = payload;
+    setFixAgeMs(0);
+    broadcastPosition(payload);
+  };
+
+  /** YAPILACAKLAR3 #1: son konum paketini (yaş bilgisiyle) tüm yolculara gönderir. */
+  const broadcastPosition = (payload: PositionPayload) => {
+    connectionsRef.current.forEach((c) => {
+      try {
+        if (c.open) c.send(payload);
+      } catch {
+        /* ignore */
+      }
+    });
+  };
+
+  const handleGpsError = (err: GeolocationPositionError) => {
+    // Bulgu 13: izin / sinyal / zaman aşımı ayrımı ve net kullanıcı mesajı
+    if (err.code === err.PERMISSION_DENIED) {
+      setGpsWarn(
+        "Konum izni reddedildi. Tarayıcı ayarlarından bu site için konumu 'İzin ver' yapın.",
+      );
+    } else if (err.code === err.POSITION_UNAVAILABLE) {
+      setGpsWarn("GPS sinyali alınamıyor. Telefonu cam kenarına alın, konum servisini açın.");
+    } else if (err.code === err.TIMEOUT) {
+      setGpsWarn("GPS gecikti, yeniden deneniyor…");
+    } else {
+      setGpsWarn(`Konum alınamadı: ${err.message}`);
+    }
+  };
+
+  // YAPILACAKLAR3 #5/#10: watchPosition'ı yeniden kurabilmek için tek giriş noktası
+  const startGpsWatch = (lowAccuracy = false) => {
+    if (watchIdRef.current !== null) {
+      try {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      } catch {
+        /* ignore */
+      }
+    }
+    lowAccuracyRef.current = lowAccuracy;
+    lastFixTsRef.current = Date.now();
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      handleGpsPosition,
+      handleGpsError,
+      lowAccuracy
+        ? { enableHighAccuracy: false, maximumAge: 5000, timeout: 30000 }
+        : { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 },
+    );
+  };
+
   const start = () => {
     setError(null);
     if (runningRef.current) return;
@@ -411,7 +633,31 @@ function DriverApp() {
     peer.on("connection", (conn) => {
       connectionsRef.current.add(conn);
       setConnCount(connectionsRef.current.size);
+      lastPongRef.current.set(conn.peer, Date.now());
+      // #17: bağlantıyı temizleyen tek giriş noktası
+      const dropConn = () => {
+        iceStopRef.current.get(conn.peer)?.();
+        iceStopRef.current.delete(conn.peer);
+        lastPongRef.current.delete(conn.peer);
+        forgetPeer(conn.peer);
+        connectionsRef.current.delete(conn);
+        setConnCount(connectionsRef.current.size);
+        try {
+          conn.close();
+        } catch {
+          /* ignore */
+        }
+      };
       conn.on("open", () => {
+        lastPongRef.current.set(conn.peer, Date.now());
+        // #16: ICE kopar/başarısız olursa önce ICE restart, olmazsa bağlantıyı düş
+        iceStopRef.current.get(conn.peer)?.();
+        iceStopRef.current.set(
+          conn.peer,
+          watchIceState(conn, () => {
+            if (!tryIceRestart(conn)) dropConn();
+          }),
+        );
         // Aktif güzergâhı ve son bilinen konumu hemen gönder
         try {
           conn.send(routePayload());
@@ -427,23 +673,49 @@ function DriverApp() {
             /* ignore */
           }
         }
-        // Radyo yayını açıksa yeni yolcuyu da hemen bağla
-        if (lastRadioRef.current) {
-          try {
-            conn.send({ ...lastRadioRef.current, ts: Date.now() });
-          } catch {
-            /* ignore */
-          }
+        // Radyo durumunu her zaman gönder: #28 (yenilenmiş şoför sekmesinde parça
+        // listesi kaybolduysa yolcu "canlı" görünmeye devam etmesin).
+        try {
+          conn.send(
+            lastRadioRef.current
+              ? { ...lastRadioRef.current, ts: Date.now() }
+              : ({
+                  type: "radio",
+                  playing: false,
+                  title: null,
+                  index: 0,
+                  total: 0,
+                  ts: Date.now(),
+                } as RadioStatePayload),
+          );
+        } catch {
+          /* ignore */
         }
-        if (radioStreamRef.current) {
-          try {
-            peerRef.current?.call(conn.peer, radioStreamRef.current);
-          } catch {
-            /* ignore */
-          }
+        // #23: yayın açıksa sonradan giren yolcuya hemen ses akışı gönder
+        if (radioStreamRef.current && peerRef.current) {
+          callPeer(peerRef.current, conn.peer, radioStreamRef.current);
         }
       });
       conn.on("data", (data) => {
+        // #17: yolcunun pong'u → bağlantı canlı sayılır
+        if ((data as PongPayload)?.type === "pong") {
+          lastPongRef.current.set(conn.peer, Date.now());
+          return;
+        }
+        // #27: yolcu radyo sesini alıyor mu?
+        if ((data as RadioAckPayload)?.type === "audio-ok") {
+          const ack = data as RadioAckPayload;
+          lastPongRef.current.set(conn.peer, Date.now());
+          markAudioOk(conn.peer, Boolean(ack.listening));
+          return;
+        }
+        // #24: yolcuya ses gelmediyse çağrıyı yeniden kur
+        if ((data as RadioRequestPayload)?.type === "radio-req") {
+          lastPongRef.current.set(conn.peer, Date.now());
+          const stream = radioStreamRef.current;
+          if (stream && peerRef.current) callPeer(peerRef.current, conn.peer, stream);
+          return;
+        }
         const p = data as VoiceAlertPayload;
         if (p?.type !== "alert") return;
         setAlerts((prev) => [p, ...prev].slice(0, 20));
@@ -457,14 +729,8 @@ function DriverApp() {
         }, 350);
       });
 
-      conn.on("close", () => {
-        connectionsRef.current.delete(conn);
-        setConnCount(connectionsRef.current.size);
-      });
-      conn.on("error", () => {
-        connectionsRef.current.delete(conn);
-        setConnCount(connectionsRef.current.size);
-      });
+      conn.on("close", dropConn);
+      conn.on("error", dropConn);
     });
 
     peer.on("error", (err) => {
@@ -490,128 +756,111 @@ function DriverApp() {
       stopInternal();
     });
 
-    // Konum takibi
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        setPosition(pos);
-        setGpsWarn(null);
-        // --- Filtrelenmiş, kalıcı sürüş istatistikleri (IndexedDB) ---
-        const now = pos.timestamp || Date.now();
-        const gpsSpeed = pos.coords.speed != null ? Math.max(0, pos.coords.speed * 3.6) : null;
-        const res = ingestFix(statsRef.current, filterRef.current, {
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          ts: now,
-          accuracy: pos.coords.accuracy,
-          gpsSpeedKmh: gpsSpeed,
-        });
-        setLiveSpeed(res.speedKmh);
-        // 10.2 GPS yedeği: ivmeölçer yoksa hız düşüşünden ani fren çıkar
-        const prevSpeed = brakePrevRef.current;
-        if (!motionReadyRef.current && prevSpeed) {
-          const gB = gpsBrakeG(prevSpeed.kmh, res.speedKmh, (now - prevSpeed.ts) / 1000);
-          if (gB > 0) registerBrake(gB, "gps");
-        }
-        brakePrevRef.current = { kmh: res.speedKmh, ts: now };
-        // Kontak API'si olmayan cihazlarda hareket/duruş yedeği
-        if (res.speedKmh > 5) {
-          lastIdleTsRef.current = now;
-          applyDay((d) => openSession(d, now));
-        } else if (now - lastIdleTsRef.current > 180000 && lastIdleTsRef.current > 0) {
-          applyDay((d) => closeSession(d, now));
-        }
-        // Durak varış saatleri (100 m yakınlık, gün içinde tek kayıt)
-        // + 10.1 Otomatik durak anonsu (350 m yakınlık, durak başına bir kez)
-        stopsRef.current
-          .filter((s) => s.kind === "stop")
-          .forEach((s) => {
-            const dm = distanceM(
-              { lat: pos.coords.latitude, lng: pos.coords.longitude },
-              { lat: s.lat, lng: s.lng },
-            );
-            if (dm <= ARRIVAL_RADIUS_M) applyDay((d) => recordArrival(d, s.id, s.name, now));
-            if (ingestStopDistance(announceStateRef.current, s.id, dm)) {
-              const payload: StopAnnouncePayload = {
-                type: "announce",
-                stopId: s.id,
-                stopName: s.name,
-                distanceM: Math.round(dm),
-                ts: Date.now(),
-              };
-              setLastAnnounce(payload);
-              broadcastEvent(payload);
-              if (announceOnRef.current) speak(announceText(s.name));
-            }
-          });
+    // Konum takibi (watchdog + kalp atışı efektleri aşağıda)
+    startGpsWatch(false);
+  };
 
-        if (res.accepted) {
-          // 8. madde: günlük mesafe ve fiili hareket süresi
-          const dMeters = res.stats.totalMeters - statsRef.current.totalMeters;
-          const dSeconds = res.stats.movingSeconds - statsRef.current.movingSeconds;
-          if (dMeters > 0 && dSeconds > 0 && res.speedKmh > 5) {
-            applyDay((d) => addDriving(d, dMeters, dSeconds));
-          }
-          statsRef.current = res.stats;
-          setStats(res.stats);
-          // Yazmayı seyrekleştir (IndexedDB'yi yormamak için ~5 sn)
-          if (now - lastSaveRef.current > 5000) {
-            lastSaveRef.current = now;
-            void saveStats(res.stats);
-          }
-        }
+  const watchLastRef = useRef<PositionPayload | null>(null);
 
-        const payload = {
-          type: "position" as const,
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          speedKmh: res.speedKmh,
-          avgSpeedKmh: avgSpeedKmh(statsRef.current),
-          totalKm: statsRef.current.totalMeters / 1000,
-          maxSpeedKmh: statsRef.current.maxSpeedKmh,
-          heading: pos.coords.heading,
-          plate: SERVICE_INFO.plate,
-          ts: Date.now(),
-        };
-        watchLastRef.current = payload;
-        connectionsRef.current.forEach((c) => {
+  // YAPILACAKLAR3 #1 & #5: kalp atışı (1 sn) + fix watchdog'u.
+  // Sinyal kesilse bile yolcuya "son paket + yaşı" gider; 15 sn fix yoksa
+  // watchPosition yeniden kurulur, 3 denemede düşük hassasiyete düşülür.
+  useEffect(() => {
+    if (!running) {
+      setFixAgeMs(null);
+      return;
+    }
+    const id = window.setInterval(() => {
+      const last = watchLastRef.current;
+      const now = Date.now();
+      if (last) {
+        const ageMs = now - last.fixTs;
+        setFixAgeMs(ageMs);
+        // #20: araç duruyorsa yayın periyodu seyreltilir (veri + batarya)
+        const stationary = last.speedKmh < 2;
+        const period = stationary ? 3000 : 1000;
+        if (now - lastBroadcastRef.current >= period - 100) {
+          lastBroadcastRef.current = now;
+          broadcastPosition({ ...last, ageMs, ts: now });
+        }
+      }
+      const sinceFix = now - lastFixTsRef.current;
+      if (lastFixTsRef.current > 0 && sinceFix > 15000) {
+        gpsRetryRef.current += 1;
+        const goLow = gpsRetryRef.current >= 3;
+        setGpsWarn(
+          goLow
+            ? "GPS yanıt vermiyor — düşük hassasiyet moduna geçildi."
+            : `GPS ${Math.round(sinceFix / 1000)} sn'dir veri göndermiyor, takip yeniden kuruluyor…`,
+        );
+        startGpsWatch(goLow || lowAccuracyRef.current);
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running]);
+
+  // YAPILACAKLAR3 #17: ping/pong ile ölü bağlantı temizliği.
+  // Yolcu sayacı böylece gerçek dinleyici sayısını gösterir.
+  useEffect(() => {
+    if (!running) return;
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      const ping: PingPayload = { type: "ping", ts: now };
+      connectionsRef.current.forEach((c) => {
+        const last = lastPongRef.current.get(c.peer) ?? now;
+        if (!c.open || now - last > PONG_TIMEOUT_MS) {
+          iceStopRef.current.get(c.peer)?.();
+          iceStopRef.current.delete(c.peer);
+          lastPongRef.current.delete(c.peer);
+          connectionsRef.current.delete(c);
           try {
-            if (c.open) c.send(payload);
+            c.close();
           } catch {
             /* ignore */
           }
-        });
-      },
-      (err) => {
-        // Bulgu 13: izin / sinyal / zaman aşımı ayrımı ve net kullanıcı mesajı
-        if (err.code === err.PERMISSION_DENIED) {
-          setGpsWarn(
-            "Konum izni reddedildi. Tarayıcı ayarlarından bu site için konumu 'İzin ver' yapın.",
-          );
-        } else if (err.code === err.POSITION_UNAVAILABLE) {
-          setGpsWarn("GPS sinyali alınamıyor. Telefonu cam kenarına alın, konum servisini açın.");
-        } else if (err.code === err.TIMEOUT) {
-          setGpsWarn("GPS gecikti, yeniden deneniyor…");
-        } else {
-          setGpsWarn(`Konum alınamadı: ${err.message}`);
+          return;
         }
-      },
-      // Bulgu 14: maximumAge 0 → bayat (takılı) fix kullanılmaz, timeout uzatıldı
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 },
-    );
-  };
+        try {
+          c.send(ping);
+        } catch {
+          /* ignore */
+        }
+      });
+      setConnCount(connectionsRef.current.size);
+    }, PING_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [running]);
 
-  const watchLastRef = useRef<{
-    type: "position";
-    lat: number;
-    lng: number;
-    speedKmh: number;
-    avgSpeedKmh: number;
-    totalKm: number;
-    maxSpeedKmh: number;
-    heading: number | null;
-    plate: string;
-    ts: number;
-  } | null>(null);
+  // YAPILACAKLAR3 #23/#24/#27: radyo çağrı bekçisi.
+  // Yayın açıkken tüm açık bağlantılarda ses akışının kurulduğunu doğrular,
+  // onay gelmeyen (sessiz kalan) yolcuya çağrıyı yeniler.
+  useEffect(() => {
+    if (!running) return;
+    const id = window.setInterval(() => {
+      const peer = peerRef.current;
+      if (!peer) return;
+      const peers = Array.from(connectionsRef.current)
+        .filter((c) => c.open)
+        .map((c) => c.peer);
+      reconcileCalls(peer, peers, radioStreamRef.current);
+      setRadioAudio(audioStats());
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [running]);
+
+  // YAPILACAKLAR3 #18: açılışta TURN (röle) erişilebilirlik testi
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    setRelayStatus("checking");
+    void checkTurnReachable().then((ok) => {
+      if (!cancelled) setRelayStatus(ok ? "ok" : "unavailable");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [running]);
 
   const stopInternal = () => {
     runningRef.current = false;
@@ -622,6 +871,12 @@ function DriverApp() {
     }
     connectionsRef.current.forEach((c) => c.close());
     connectionsRef.current.clear();
+    iceStopRef.current.forEach((stop) => stop());
+    iceStopRef.current.clear();
+    lastPongRef.current.clear();
+    clearCalls();
+    setRadioAudio({ receiving: 0, listening: 0 });
+    setRelayStatus("unknown");
     peerRef.current?.destroy();
     peerRef.current = null;
     setConnCount(0);
@@ -827,6 +1082,16 @@ function DriverApp() {
               <div className="flex-1">
                 <div className="hud-label">Durum</div>
                 <div className="font-bold">YAYINDA · {SERVICE_INFO.plate}</div>
+                {/* #18: röle (TURN) erişilebilirlik rozeti */}
+                <div className="hud-label mt-0.5">
+                  {relayStatus === "checking"
+                    ? "Röle (TURN) kontrol ediliyor…"
+                    : relayStatus === "ok"
+                      ? "Röle (TURN) hazır · zayıf ağlarda yedek var"
+                      : relayStatus === "unavailable"
+                        ? "Röle (TURN) yanıt vermiyor · bazı yolcular bağlanamayabilir"
+                        : ""}
+                </div>
               </div>
               <div className="text-right">
                 <div className="hud-label">Yolcu</div>
@@ -999,6 +1264,8 @@ function DriverApp() {
                 connectionsRef={connectionsRef}
                 radioStreamRef={radioStreamRef}
                 broadcast={broadcastRadio}
+                listeningCount={radioAudio.listening}
+                receivingCount={radioAudio.receiving}
               />
             </Suspense>
 
@@ -1095,6 +1362,16 @@ function DriverApp() {
                     className={`w-2.5 h-2.5 rounded-full ${acc.level === "iyi" ? "bg-primary" : acc.level === "zayıf" ? "bg-yellow-500" : "bg-red-500"}`}
                   />
                   <span className="font-mono">{acc.text}</span>
+                  {running && fixAgeMs != null && (
+                    <span
+                      className={`font-mono text-xs ${fixAgeMs > 10000 ? "text-yellow-500" : "text-muted-foreground"}`}
+                    >
+                      fix {Math.round(fixAgeMs / 1000)} sn
+                    </span>
+                  )}
+                  {calibrating && (
+                    <span className="font-mono text-xs text-yellow-500">kalibre ediliyor…</span>
+                  )}
                   {gpsWarn && <span className="ml-auto text-right text-red-400">{gpsWarn}</span>}
                 </div>
               );

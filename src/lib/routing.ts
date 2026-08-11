@@ -1,5 +1,20 @@
 import { OSRM_BASE } from "./service-config";
 
+/** #39: OSRM public demo yavaş/kapalı olabilir — her istek zaman aşımlı. */
+export const OSRM_TIMEOUT_MS = 7000;
+
+async function fetchWithTimeout(url: string, ms = OSRM_TIMEOUT_MS): Promise<Response | null> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    return res;
+  } catch {
+    return null;
+  }
+}
+
 export interface RouteResult {
   path: [number, number][]; // [lat, lng]
   distanceM: number;
@@ -14,8 +29,8 @@ export async function getRoute(
   const coords = points.map((p) => `${p.lng},${p.lat}`).join(";");
   const url = `${OSRM_BASE}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
   try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
+    const res = await fetchWithTimeout(url);
+    if (!res || !res.ok) return null;
     const data = await res.json();
     const r = data.routes?.[0];
     if (!r) return null;
@@ -36,8 +51,8 @@ export async function getEta(
 ): Promise<{ durationS: number; distanceM: number } | null> {
   const url = `${OSRM_BASE}/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=false`;
   try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
+    const res = await fetchWithTimeout(url);
+    if (!res || !res.ok) return null;
     const data = await res.json();
     const r = data.routes?.[0];
     if (!r) return null;

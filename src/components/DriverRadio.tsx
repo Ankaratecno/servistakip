@@ -4,6 +4,8 @@ import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
 import { loadBuffer, playJingle } from "@/lib/jingle";
 import { hourAnnouncementUrl, randomJingleUrl } from "@/lib/voice-assets";
+import { callPeer, ensureCall } from "@/lib/radio-calls";
+import { setMediaHandlers, setNowPlaying, setPlaybackState } from "@/lib/media-session";
 
 interface Track {
   name: string;
@@ -15,11 +17,15 @@ export default function DriverRadio({
   connectionsRef,
   radioStreamRef,
   broadcast,
+  listeningCount = 0,
+  receivingCount = 0,
 }: {
   peerRef: React.MutableRefObject<Peer | null>;
   connectionsRef: React.MutableRefObject<Set<DataConnection>>;
   radioStreamRef: React.MutableRefObject<MediaStream | null>;
   broadcast: (p: RadioStatePayload) => void;
+  listeningCount?: number;
+  receivingCount?: number;
 }) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [index, setIndex] = useState(0);
@@ -79,20 +85,23 @@ export default function DriverRadio({
       monitorGainRef.current = monitorGain;
       destRef.current = dest;
       radioStreamRef.current = dest.stream;
+      // #23: yayın kaynağı yeni oluştu → mevcut tüm yolculara hemen çağrı at.
+      window.setTimeout(() => callEveryone(true), 0);
     }
     void ctxRef.current.resume();
   };
 
-  const callEveryone = () => {
+  // #21: her play/jingle'da yeniden peer.call yapmak yolcuya çift ses veriyordu.
+  // Peer başına tek aktif çağrı tutulur; force=true yalnızca yayın kaynağı
+  // değiştiğinde (yeni MediaStream) kullanılır.
+  const callEveryone = (force = false) => {
     const peer = peerRef.current;
     const stream = radioStreamRef.current;
     if (!peer || !stream) return;
     connectionsRef.current.forEach((c) => {
-      try {
-        peer.call(c.peer, stream);
-      } catch {
-        /* ignore */
-      }
+      if (!c.open) return;
+      if (force) callPeer(peer, c.peer, stream);
+      else ensureCall(peer, c.peer, stream);
     });
   };
 
@@ -118,6 +127,8 @@ export default function DriverRadio({
       await el.play();
       setIndex(safe);
       setPlaying(true);
+      setNowPlaying(list[safe]!.name);
+      setPlaybackState(true);
       callEveryone();
       sendState(true, safe);
       setErr(null);
@@ -142,6 +153,7 @@ export default function DriverRadio({
     const out = gainRef.current!;
     busyRef.current = true;
     setOnAir(label);
+    setNowPlaying(label);
     duck(true);
     callEveryone();
     broadcast({
@@ -164,7 +176,10 @@ export default function DriverRadio({
     duck(false);
     setOnAir(null);
     busyRef.current = false;
-    sendState(!audioRef.current?.paused, indexRef.current);
+    const stillPlaying = !audioRef.current?.paused;
+    setNowPlaying(tracksRef.current[indexRef.current]?.name ?? null);
+    setPlaybackState(stillPlaying);
+    sendState(stillPlaying, indexRef.current);
   };
 
   /** Şarkı bittiğinde: her N şarkıda bir jingle, sonra sıradaki parça. */
@@ -205,14 +220,23 @@ export default function DriverRadio({
     if (el.paused) {
       void el.play();
       setPlaying(true);
+      setPlaybackState(true);
       callEveryone();
       sendState(true, indexRef.current);
     } else {
       el.pause();
       setPlaying(false);
+      setPlaybackState(false);
       sendState(false, indexRef.current);
     }
   };
+
+  // Araç teybi / Bluetooth ekranında parça adı ve tuş kontrolleri
+  useEffect(() => {
+    setMediaHandlers({ play: toggle, pause: toggle, next, prev });
+    return () => setMediaHandlers({});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Durumu düzenli yayınla: sonradan bağlanan yolcu da doğru parçayı görsün
   useEffect(() => {
@@ -279,7 +303,7 @@ export default function DriverRadio({
       <div className="flex items-center justify-between mb-3">
         <div className="hud-label">Servis Radyosu</div>
         <div className="text-[11px] font-mono text-muted-foreground">
-          {tracks.length} PARÇA · {connectionsRef.current.size} DİNLEYİCİ
+          {tracks.length} PARÇA · {listeningCount}/{connectionsRef.current.size} DİNLİYOR
         </div>
       </div>
 
@@ -306,6 +330,13 @@ export default function DriverRadio({
         <div className="text-[11px] font-mono text-muted-foreground mt-1">
           {onAir ? "JINGLE" : playing ? "YAYINDA" : "DURAKLATILDI"}
           {tracks.length > 0 && ` · ${index + 1}/${tracks.length}`}
+        </div>
+        {/* #27: yolcular gerçekten duyuyor mu? */}
+        <div className="text-[11px] font-mono mt-1">
+          <span className="text-muted-foreground">SES ULAŞAN: </span>
+          {receivingCount}/{connectionsRef.current.size}
+          <span className="text-muted-foreground"> · SESİ AÇAN: </span>
+          {listeningCount}
         </div>
       </div>
 

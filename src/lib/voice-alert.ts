@@ -1,3 +1,5 @@
+import { sharedAudioContext } from "@/lib/audio-context";
+
 // Yolcu → Şoför sesli/erken uyarı sistemi için ortak tipler ve yardımcılar.
 
 export interface VoiceAlertPayload {
@@ -39,27 +41,95 @@ export async function playBase64Audio(base64: string, mime: string) {
   await audio.play().catch(() => undefined);
 }
 
-/** Tarayıcı konuşma sentezi ile Türkçe sesli uyarı (ses kaydı yoksa). */
-export function speak(text: string) {
+/** Konuşma başladı/bitti aboneleri (radyo kısma için). */
+type SpeakListener = (speaking: boolean) => void;
+const speakListeners = new Set<SpeakListener>();
+let speakingNow = false;
+
+export function onSpeaking(fn: SpeakListener): () => void {
+  speakListeners.add(fn);
+  fn(speakingNow);
+  return () => speakListeners.delete(fn);
+}
+
+function setSpeaking(v: boolean) {
+  if (speakingNow === v) return;
+  speakingNow = v;
+  speakListeners.forEach((f) => {
+    try {
+      f(v);
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+export function isSpeaking() {
+  return speakingNow;
+}
+
+// YAPILACAKLAR3 #30: TTS kuyruğu — durak anonsu, fren ve saat anonsu
+// üst üste binmesin; sırayla konuşulsun.
+const queue: string[] = [];
+let running = false;
+
+function runQueue() {
+  if (running) return;
+  const text = queue.shift();
+  if (text === undefined) {
+    setSpeaking(false);
+    return;
+  }
+  running = true;
+  setSpeaking(true);
   try {
-    if (typeof speechSynthesis === "undefined") return;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "tr-TR";
     u.rate = 1;
+    const done = () => {
+      running = false;
+      window.setTimeout(runQueue, 120);
+    };
+    u.onend = done;
+    u.onerror = done;
     speechSynthesis.speak(u);
+    // Bazı tarayıcılarda onend hiç gelmez; süreye göre emniyet zamanlayıcısı.
+    window.setTimeout(
+      () => {
+        if (running) done();
+      },
+      Math.max(4000, text.length * 110),
+    );
   } catch {
-    /* ignore */
+    running = false;
+    setSpeaking(false);
   }
 }
 
-/** Dikkat çekmek için kısa bip sesi. */
+/** Tarayıcı konuşma sentezi ile Türkçe sesli uyarı (kuyruklu). */
+export function speak(text: string) {
+  if (typeof speechSynthesis === "undefined" || !text) return;
+  if (queue.length > 4) queue.shift();
+  queue.push(text);
+  runQueue();
+}
+
+export function cancelSpeech() {
+  queue.length = 0;
+  try {
+    speechSynthesis.cancel();
+  } catch {
+    /* ignore */
+  }
+  running = false;
+  setSpeaking(false);
+}
+
+/** Dikkat çekmek için kısa bip sesi (paylaşılan AudioContext — #31). */
 export function beep() {
   try {
-    const Ctx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Ctx) return;
-    const ctx = new Ctx();
+    const ctx = sharedAudioContext();
+    if (!ctx) return;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "square";
@@ -68,7 +138,6 @@ export function beep() {
     osc.connect(gain).connect(ctx.destination);
     osc.start();
     osc.stop(ctx.currentTime + 0.25);
-    osc.onended = () => void ctx.close();
   } catch {
     /* ignore */
   }

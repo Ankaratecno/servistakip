@@ -3,16 +3,20 @@
 
 // ---------- 10.1 Otomatik durak anonsu ----------
 
-/** Bu mesafeye girince anons yapılır. */
+/** Yedek (sabit) anons eşiği — dinamik eşik hesaplanamazsa kullanılır. */
 export const ANNOUNCE_M = 350;
-/** Duraktan bu kadar uzaklaşınca anons kilidi sıfırlanır (tur başı tekrar anons). */
-export const ANNOUNCE_RESET_M = 700;
+/**
+ * #36: Anons kilidi artık mesafeyle DEĞİL, "durak geçildi" olayıyla sıfırlanır.
+ * Yakın duraklarda (700 m'den az aralıklı) uyarı atlanması böylece biter.
+ */
 
 export interface StopAnnouncePayload {
   type: "announce";
   stopId: string;
   stopName: string;
   distanceM: number;
+  /** Tahmini varış süresi (saniye) — ETA tabanlı anons metni için (#33) */
+  etaS?: number;
   ts: number;
 }
 
@@ -25,26 +29,35 @@ export const initialAnnounceState = (): AnnounceState => ({ announced: new Set<s
 
 /**
  * Durak mesafesini işler; anons yapılması gerekiyorsa true döner.
- * Mesafe RESET eşiğinin üstüne çıkınca durak yeniden anons edilebilir hale gelir.
+ * Eşik hıza göre dinamik verilir (#35). Kilit yalnızca `resetAnnounce` ile
+ * (durak geçildiğinde) açılır (#36).
  */
 export function ingestStopDistance(
   state: AnnounceState,
   stopId: string,
   distanceM: number,
+  thresholdM: number = ANNOUNCE_M,
 ): boolean {
-  if (distanceM > ANNOUNCE_RESET_M) {
-    state.announced.delete(stopId);
-    return false;
-  }
-  if (distanceM <= ANNOUNCE_M && !state.announced.has(stopId)) {
+  if (distanceM <= thresholdM && !state.announced.has(stopId)) {
     state.announced.add(stopId);
     return true;
   }
   return false;
 }
 
-export function announceText(stopName: string): string {
-  return `Sayın yolcular, yaklaşan durağımız ${stopName}. İnecek yolcularımız hazırlansın.`;
+/** Durak geçildiğinde anons kilidini açar (yeni tur / tekrar geçiş için). */
+export function resetAnnounce(state: AnnounceState, stopId: string) {
+  state.announced.delete(stopId);
+}
+
+export function announceText(stopName: string, etaS?: number | null): string {
+  const base = `Sayın yolcular, yaklaşan durağımız ${stopName}`;
+  if (etaS == null || !isFinite(etaS)) {
+    return `${base}. İnecek yolcularımız hazırlansın.`;
+  }
+  if (etaS <= 45) return `${base}. Durağa geliyoruz, inecek yolcularımız hazırlansın.`;
+  const mins = Math.max(1, Math.round(etaS / 60));
+  return `${base}. Tahmini ${mins} dakika. İnecek yolcularımız hazırlansın.`;
 }
 
 // ---------- 10.2 Ani fren algılama ----------

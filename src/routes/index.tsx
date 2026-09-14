@@ -495,6 +495,10 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             vibrate([200, 100, 200]);
             speak(announceText(a.stopName));
           }
+        } else if ((p as { type?: string })?.type === "voice") {
+          // Şoför tarafında sunucu sesi yoksa anons metni gelir; telefon okur.
+          const text = (p as { text?: unknown }).text;
+          if (typeof text === "string" && text && announceOnRef.current) speak(text);
         } else if (p?.type === "brake") {
           const b = p as BrakeEventPayload;
           setBrakes((prev) => [b, ...prev].slice(0, 20));

@@ -14,6 +14,7 @@ import {
   type SongRequest,
 } from "@/lib/song-request";
 import { synthAnnouncement } from "@/lib/tts.functions";
+import { canSpeakLocally, speakLocally } from "@/lib/speak-fallback";
 
 export function RequestDisplay({ title, rider }: { title: string | null; rider: string | null }) {
   const [showRider, setShowRider] = useState(false);
@@ -327,8 +328,17 @@ export default function DriverRadio({
       );
       await playJingle(ctx, out, { voice: buf, soft: false });
     } catch {
-      // Spiker sesi üretilemezse en azından jingle çalsın.
+      // Sunucu TTS yok (statik yayın): jingle çalsın, anonsu hem şoförün
+      // telefonu hem de yolcuların telefonu kendi sesiyle okusun.
       await playJingle(ctx, out, { voice: null, soft: false, bedDuration: 2.6 });
+      connectionsRef.current.forEach((c) => {
+        try {
+          c.send({ type: "voice", text, ts: Date.now() });
+        } catch {
+          /* bağlantı kapanmış olabilir */
+        }
+      });
+      if (canSpeakLocally()) await speakLocally(text);
     }
     duck(false);
     busyRef.current = false;

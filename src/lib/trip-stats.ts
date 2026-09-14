@@ -80,7 +80,8 @@ const GOOD_ACCURACY_M = 35;
 const MAX_ACCURACY_M = 90;
 // YAPILACAKLAR3 #3: ivme kapısı artık simetrik değil. Frenleme hızlanmadan çok
 // daha sert olabilir; simetrik 8 km/s/s frende hızı yüksek değerde kilitliyordu.
-const MAX_ACCEL_KMH_PER_S = 6; // hızlanma sınırı
+// Kalkışta ekran gerçek hızın gerisinde kalmasın: 6 çok dardı, 11 gerçekçi.
+const MAX_ACCEL_KMH_PER_S = 11; // hızlanma sınırı
 const MAX_DECEL_KMH_PER_S = 15; // yavaşlama sınırı (fren)
 // YAPILACAKLAR3 #6: Android çoğu zaman ~0.9 sn aralıkla fix üretiyor; 1 sn eşiği
 // bu fixleri tamamen çöpe atıyordu.
@@ -93,14 +94,17 @@ const MAX_DT = 600; // saniye (bu üzeri tam sıfırlama)
 const SPEED_TAU_S = 2.2;
 // YAPILACAKLAR3 #4: gürültü tabanına üst sınır - 90 m fix'te 108 m eşik
 // şehir içi gerçek hareketi "gürültü" sayıp sayacı donduruyordu.
-const MAX_NOISE_FLOOR_M = 38;
+const MAX_NOISE_FLOOR_M = 30;
 // GPS kendi hız alanı bu değerin üstündeyse hareket teyit edilmiş sayılır
-// ve gürültü tabanı esnetilir.
-const GPS_MOVE_CONFIRM_KMH = 6;
+// ve gürültü tabanı esnetilir. (Ağır trafikte sayaç donmasın diye düşürüldü.)
+const GPS_MOVE_CONFIRM_KMH = 4;
 // YAPILACAKLAR3 #11: uzun boşluktan sonra kısa "kalibre ediliyor" süresi
 const CALIBRATION_MS = 4000;
-// Bulgu 10: bu hızın altı "duruş" sayılır (GPS hayalet hızı temizlenir)
-const IDLE_KMH = 3;
+// Bulgu 10: bu hızın altı "duruş" sayılır (GPS hayalet hızı temizlenir).
+// Ağır trafikte 3 km/s "durdu" gibi göründüğü için gösterim eşiği düşürüldü;
+// hareket süresi sayacı için ayrı ve daha yüksek eşik kullanılır.
+const IDLE_KMH = 1.5;
+const MOVING_KMH = 3;
 
 export interface FixInput {
   lat: number;
@@ -193,6 +197,11 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
     // #8: zaman tabanlı sönüm
     const decay = 1 - Math.exp(-dt / SPEED_TAU_S);
     state.smoothedKmh = state.smoothedKmh * (1 - decay);
+    // Sinyal zayıfken GPS hâlâ küçük bir hız bildiriyorsa sıfıra düşürmeyip
+    // o değere yaklaştır: ağır trafikte "durdu" görünmesin.
+    if (gps != null && gps >= IDLE_KMH && gps > state.smoothedKmh) {
+      state.smoothedKmh = state.smoothedKmh + (gps - state.smoothedKmh) * decay;
+    }
     if (state.smoothedKmh < IDLE_KMH) state.smoothedKmh = 0;
     state.fastStreak = 0;
     return reject();
@@ -239,7 +248,7 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
   const nextMax = peakOk ? Math.min(measured, MAX_PLAUSIBLE_KMH) : stats.maxSpeedKmh;
 
   // Bulgu 11: yalnızca fiilî hareket süresi sayılır
-  const movingDelta = measured >= IDLE_KMH ? dt : 0;
+  const movingDelta = measured >= MOVING_KMH ? dt : 0;
 
   const next: TripStats = {
     totalMeters: stats.totalMeters + dm,

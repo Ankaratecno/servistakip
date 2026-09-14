@@ -142,3 +142,42 @@ export function beep() {
     /* ignore */
   }
 }
+
+/** Telsiz hışırtısı (beyaz gürültü + bant filtresi). */
+function squelch(durationMs: number, peak: number) {
+  try {
+    const ctx = sharedAudioContext();
+    if (!ctx) return;
+    const dur = durationMs / 1000;
+    const frames = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i += 1) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const band = ctx.createBiquadFilter();
+    band.type = "bandpass";
+    band.frequency.value = 1800;
+    band.Q.value = 0.9;
+    const gain = ctx.createGain();
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + Math.min(0.03, dur / 3));
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(band).connect(gain).connect(ctx.destination);
+    src.start(t);
+    src.stop(t + dur);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Konuşma başlarken: telsiz açılış hışırtısı. */
+export function squelchOpen() {
+  squelch(180, 0.09);
+}
+
+/** Konuşma biterken: kısa kapanış cızırtısı. */
+export function squelchClose() {
+  squelch(110, 0.06);
+}

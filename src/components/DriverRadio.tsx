@@ -2,10 +2,37 @@ import { useEffect, useRef, useState } from "react";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
-import { loadBuffer, playJingle } from "@/lib/jingle";
+import { loadBuffer, loadVoiceBuffer, playJingle } from "@/lib/jingle";
 import { hourAnnouncementUrl, randomJingleUrl } from "@/lib/voice-assets";
 import { callPeer, ensureCall } from "@/lib/radio-calls";
 import { setMediaHandlers, setNowPlaying, setPlaybackState } from "@/lib/media-session";
+import {
+  onSongRequest,
+  requestAnnouncementText,
+  riderLabel,
+  type SongAckPayload,
+  type SongRequest,
+} from "@/lib/song-request";
+import { synthAnnouncement } from "@/lib/tts.functions";
+
+export function RequestDisplay({ title, rider }: { title: string | null; rider: string | null }) {
+  const [showRider, setShowRider] = useState(false);
+  useEffect(() => {
+    if (!rider) {
+      setShowRider(false);
+      return;
+    }
+    setShowRider(false);
+    const id = window.setInterval(() => setShowRider((s) => !s), 4000);
+    return () => window.clearInterval(id);
+  }, [rider]);
+
+  return (
+    <div className="font-bold text-lg tracking-wide truncate text-foreground">
+      {showRider && rider ? `· ${rider}` : (title ?? "—")}
+    </div>
+  );
+}
 
 interface Track {
   name: string;
@@ -37,6 +64,10 @@ export default function DriverRadio({
   const [jingleEvery, setJingleEvery] = useState(3);
   const [hourlyOn, setHourlyOn] = useState(true);
   const [onAir, setOnAir] = useState<string | null>(null);
+  // Yolcu istek şarkıları (P2P ile gelen dosyalar)
+  const [queue, setQueue] = useState<SongRequest[]>([]);
+  const [nowRequest, setNowRequest] = useState<SongRequest | null>(null);
+  const [autoRequests, setAutoRequests] = useState(true);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -55,6 +86,12 @@ export default function DriverRadio({
   jingleOnRef.current = jingleOn;
   const jingleEveryRef = useRef(3);
   jingleEveryRef.current = jingleEvery;
+  const queueRef = useRef<SongRequest[]>([]);
+  queueRef.current = queue;
+  const nowRequestRef = useRef<SongRequest | null>(null);
+  nowRequestRef.current = nowRequest;
+  const autoRequestsRef = useRef(true);
+  autoRequestsRef.current = autoRequests;
 
   // Audio grafiği: <audio> -> gain -> (yayın hedefi + hoparlör)
   const ensureGraph = () => {
@@ -105,11 +142,17 @@ export default function DriverRadio({
     });
   };
 
+  const requestTitle = (r: SongRequest) => `${r.title} · ${riderLabel(r).toUpperCase()} İSTEĞİ`;
+
+  const requestRiderLine = (r: SongRequest) => `· ${riderLabel(r).toUpperCase()} İSTEĞİ`;
+
   const sendState = (isPlaying: boolean, idx: number) => {
+    const req = nowRequestRef.current;
     broadcast({
       type: "radio",
       playing: isPlaying,
-      title: tracksRef.current[idx]?.name ?? null,
+      title: req ? req.title : (tracksRef.current[idx]?.name ?? null),
+      rider: req ? `${riderLabel(req).toUpperCase()} İSTEĞİ` : null,
       index: idx,
       total: tracksRef.current.length,
       ts: Date.now(),
@@ -121,6 +164,8 @@ export default function DriverRadio({
     if (list.length === 0) return;
     const safe = ((idx % list.length) + list.length) % list.length;
     ensureGraph();
+    nowRequestRef.current = null;
+    setNowRequest(null);
     const el = audioRef.current!;
     if (el.src !== list[safe]!.url) el.src = list[safe]!.url;
     try {
@@ -146,6 +191,86 @@ export default function DriverRadio({
     if (el) el.volume = on ? 0.12 : 1;
   };
 
+  // ---- Telsiz: bas-konuş (şoför → tüm dinleyen yolcular) ----
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micGainRef = useRef<GainNode | null>(null);
+  const [talking, setTalking] = useState(false);
+  const [micErr, setMicErr] = useState<string | null>(null);
+
+  /** Yayın hattına kısa telsiz hışırtısı basar (yolcular da duyar). */
+  const squelchBurst = (durationMs: number, peak: number) => {
+    const ctx = ctxRef.current;
+    const out = gainRef.current;
+    if (!ctx || !out) return;
+    const dur = durationMs / 1000;
+    const frames = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i += 1) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const band = ctx.createBiquadFilter();
+    band.type = "bandpass";
+    band.frequency.value = 1800;
+    band.Q.value = 0.9;
+    const gain = ctx.createGain();
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + Math.min(0.03, dur / 3));
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(band).connect(gain).connect(out);
+    src.start(t);
+    src.stop(t + dur);
+  };
+
+  const startTalk = async () => {
+    if (talking) return;
+    setMicErr(null);
+    try {
+      ensureGraph();
+      const ctx = ctxRef.current!;
+      const dest = destRef.current!;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      micStreamRef.current = stream;
+      const src = ctx.createMediaStreamSource(stream);
+      const band = ctx.createBiquadFilter();
+      band.type = "bandpass";
+      band.frequency.value = 1700;
+      band.Q.value = 0.7;
+      const gain = ctx.createGain();
+      gain.gain.value = 1.4;
+      // Mikrofon sadece yayına gider (kendi hoparlörüne gitmez → uğuldama olmaz)
+      src.connect(band).connect(gain).connect(dest);
+      micGainRef.current = gain;
+      duck(true);
+      callEveryone();
+      squelchBurst(170, 0.12);
+      setTalking(true);
+    } catch {
+      setMicErr("Mikrofon açılamadı. Tarayıcı izni verilmemiş olabilir.");
+    }
+  };
+
+  const stopTalk = () => {
+    if (!talking) return;
+    setTalking(false);
+    micGainRef.current?.disconnect();
+    micGainRef.current = null;
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    squelchBurst(110, 0.08);
+    window.setTimeout(() => duck(false), 160);
+  };
+
+  useEffect(
+    () => () => {
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    },
+    [],
+  );
+
   const runJingle = async (url: string, soft: boolean, label: string) => {
     if (busyRef.current) return;
     ensureGraph();
@@ -161,6 +286,7 @@ export default function DriverRadio({
       playing: true,
       // Teypte/kilit ekranında müzik adı kalsın; jingle etiketi gönderilmez.
       title: tracksRef.current[indexRef.current]?.name ?? null,
+      rider: null,
       index: indexRef.current,
       total: tracksRef.current.length,
       ts: Date.now(),
@@ -183,9 +309,71 @@ export default function DriverRadio({
     sendState(stillPlaying, indexRef.current);
   };
 
-  /** Şarkı bittiğinde: her N şarkıda bir jingle, sonra sıradaki parça. */
+  /** İstek şarkısı anonsu: adı varsa isimle, yoksa durak adıyla. */
+  const announceRequest = async (req: SongRequest) => {
+    ensureGraph();
+    const ctx = ctxRef.current!;
+    const out = gainRef.current!;
+    busyRef.current = true;
+    setOnAir(`🎧 İSTEK · ${riderLabel(req)}`);
+    duck(true);
+    callEveryone();
+    const text = requestAnnouncementText(req);
+    try {
+      const buf = await loadVoiceBuffer(
+        ctx,
+        `req:${text}`,
+        async () => (await synthAnnouncement({ data: { text } })).mp3,
+      );
+      await playJingle(ctx, out, { voice: buf, soft: false });
+    } catch {
+      // Spiker sesi üretilemezse en azından jingle çalsın.
+      await playJingle(ctx, out, { voice: null, soft: false, bedDuration: 2.6 });
+    }
+    duck(false);
+    busyRef.current = false;
+  };
+
+  /** Yolcu isteğini anonsla birlikte yayına alır. */
+  const playRequest = async (req: SongRequest) => {
+    setQueue((prev) => prev.filter((r) => r.id !== req.id));
+    queueRef.current = queueRef.current.filter((r) => r.id !== req.id);
+    await announceRequest(req);
+    ensureGraph();
+    const el = audioRef.current!;
+    el.src = req.url;
+    try {
+      await el.play();
+      nowRequestRef.current = req;
+      setNowRequest(req);
+      setPlaying(true);
+      setNowPlaying(requestTitle(req));
+      setPlaybackState(true);
+      callEveryone();
+      sendState(true, indexRef.current);
+      setOnAir(null);
+      setErr(null);
+    } catch {
+      setOnAir(null);
+      setErr("İstek şarkısı çalınamadı.");
+    }
+  };
+  const playRequestRef = useRef(playRequest);
+  playRequestRef.current = playRequest;
+
+  /** Şarkı bittiğinde: istek sırası → jingle → sıradaki parça. */
   const afterTrack = async () => {
-    playedCountRef.current += 1;
+    if (nowRequestRef.current) {
+      nowRequestRef.current = null;
+      setNowRequest(null);
+    } else {
+      playedCountRef.current += 1;
+    }
+    const pending = queueRef.current[0];
+    if (autoRequestsRef.current && pending) {
+      await playRequest(pending);
+      return;
+    }
     const every = Math.max(1, jingleEveryRef.current);
     if (jingleOnRef.current && playedCountRef.current % every === 0) {
       await runJingle(randomJingleUrl(), false, "🎙 ELEKTRO RADYO");
@@ -194,6 +382,34 @@ export default function DriverRadio({
   };
   const afterTrackRef = useRef(afterTrack);
   afterTrackRef.current = afterTrack;
+
+  // Yolculardan P2P ile gelen istek şarkıları
+  useEffect(
+    () =>
+      onSongRequest((req) => {
+        setQueue((prev) => [...prev, req]);
+        queueRef.current = [...queueRef.current, req];
+        const conn = Array.from(connectionsRef.current).find((c) => c.peer === req.peerId);
+        try {
+          conn?.send({
+            type: "song-ack",
+            id: req.id,
+            ok: true,
+            queue: queueRef.current.length,
+            ts: Date.now(),
+          } as SongAckPayload);
+        } catch {
+          /* ignore */
+        }
+        const el = audioRef.current;
+        // Yayın boştaysa isteği hemen yayına al
+        if (autoRequestsRef.current && !busyRef.current && (!el || el.paused)) {
+          void playRequestRef.current(req);
+        }
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   const playStationId = () => void runJingle(randomJingleUrl(), false, "🎙 ELEKTRO RADYO");
 
@@ -325,20 +541,59 @@ export default function DriverRadio({
         USB'den telefona kopyaladığın MP3'leri seç; yayın açıkken tüm yolcular canlı dinler.
       </p>
 
-      <div className="mt-4 rounded-md border border-border p-3">
-        <div className="hud-label mb-1">Şu An Çalıyor</div>
-        <div className="font-bold truncate">{onAir ?? (current ? current.name : "—")}</div>
-        <div className="text-[11px] font-mono text-muted-foreground mt-1">
-          {onAir ? "JINGLE" : playing ? "YAYINDA" : "DURAKLATILDI"}
+      <div className="mt-4 rounded-md border border-border bg-card/80 p-4">
+        <div className="text-[11px] font-mono text-muted-foreground mb-2">
+          {onAir ? "JINGLE" : nowRequest ? "İSTEK YAYINDA" : playing ? "YAYINDA" : "DURAKLATILDI"}
           {tracks.length > 0 && ` · ${index + 1}/${tracks.length}`}
         </div>
+        <RequestDisplay
+          title={
+            onAir
+              ? current
+                ? current.name
+                : null
+              : nowRequest
+                ? nowRequest.title
+                : current
+                  ? current.name
+                  : null
+          }
+          rider={nowRequest && !onAir ? `${riderLabel(nowRequest).toUpperCase()} İSTEĞİ` : null}
+        />
         {/* #27: yolcular gerçekten duyuyor mu? */}
-        <div className="text-[11px] font-mono mt-1">
+        <div className="text-[11px] font-mono mt-3">
           <span className="text-muted-foreground">SES ULAŞAN: </span>
           {receivingCount}/{connectionsRef.current.size}
           <span className="text-muted-foreground"> · SESİ AÇAN: </span>
           {listeningCount}
         </div>
+      </div>
+
+      {/* Telsiz: basılı tut, konuş — tüm dinleyen yolcular duyar */}
+      <div className="mt-3 rounded-md border border-border p-3">
+        <div className="hud-label mb-2">Telsiz · Yolculara Anons</div>
+        <button
+          type="button"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            void startTalk();
+          }}
+          onPointerUp={stopTalk}
+          onPointerLeave={stopTalk}
+          onPointerCancel={stopTalk}
+          className={`w-full select-none rounded-md py-4 text-base font-bold transition ${
+            talking
+              ? "bg-destructive text-destructive-foreground"
+              : "bg-primary text-primary-foreground hover:bg-primary/90"
+          }`}
+          style={{ touchAction: "none" }}
+        >
+          {talking ? "🎙 KONUŞ · YAYINDA" : "🎙 BASILI TUT & KONUŞ"}
+        </button>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Basılı tuttuğun sürece müzik kısılır, sesin telsiz hışırtısıyla tüm yolculara gider.
+        </p>
+        {micErr && <p className="mt-2 text-xs text-destructive">{micErr}</p>}
       </div>
 
       <div className="grid grid-cols-3 gap-2 mt-3">
@@ -439,6 +694,59 @@ export default function DriverRadio({
             🕐 Saat Anonsu
           </button>
         </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-border p-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="hud-label">Yolcu İstekleri</div>
+          <span className="text-[11px] font-mono text-muted-foreground">{queue.length} SIRADA</span>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+          <input
+            type="checkbox"
+            checked={autoRequests}
+            onChange={(e) => setAutoRequests(e.target.checked)}
+            className="w-4 h-4 accent-primary"
+          />
+          İstekler sırası gelince otomatik çalsın (anonslu)
+        </label>
+        {queue.length === 0 ? (
+          <div className="text-xs text-muted-foreground mt-2">
+            Yolcular radyo sekmesinden müzik gönderdiğinde burada sıraya girer.
+          </div>
+        ) : (
+          <div className="mt-2 flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
+            {queue.map((r) => (
+              <div
+                key={r.id}
+                className="flex items-center gap-2 px-3 py-2 rounded-md border border-border text-sm"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="truncate font-semibold">{r.title}</div>
+                  <div className="text-[11px] font-mono text-muted-foreground truncate">
+                    {riderLabel(r)}
+                  </div>
+                </div>
+                <button
+                  onClick={() => void playRequest(r)}
+                  className="px-2 py-1 rounded border border-border text-xs hover:bg-muted/50"
+                >
+                  ▶ Çal
+                </button>
+                <button
+                  onClick={() => {
+                    URL.revokeObjectURL(r.url);
+                    setQueue((prev) => prev.filter((x) => x.id !== r.id));
+                  }}
+                  className="px-2 py-1 rounded border border-border text-xs hover:bg-muted/50"
+                  aria-label="İsteği sil"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {tracks.length > 0 && (

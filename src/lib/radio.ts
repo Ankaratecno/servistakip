@@ -2,6 +2,8 @@ export interface RadioStatePayload {
   type: "radio";
   playing: boolean;
   title: string | null;
+  /** İstek şarkısındaki istekçi etiketi (örn. "AZRA İSTEĞİ"). */
+  rider: string | null;
   index: number;
   total: number;
   ts: number;

@@ -10,6 +10,7 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 ---
 
 ## A. Hız / km takılmaları (önceki 6 madde + yeni tespitler)
+
 - ✅ 1. **Kalp atışı (heartbeat) yok.** `position` paketi yalnızca GPS fix geldiğinde gönderiliyor (`driver.tsx:563`). Sinyal kesilince yolcu ekranı son hızı sonsuza kadar gösteriyor — "takılma" hissinin 1 numaralı sebebi. 1 sn'lik timer ile son paket + `ageMs` gönderilmeli.
 - ✅ 2. **Veri yaşı göstergesi yok.** Yolcuda "3 sn önce güncellendi" ve >10 sn'de hızın soluklaşıp `—` olması gerekir; şu an bayat veri canlı veri gibi duruyor.
 - ✅ 3. **İvme kapısı simetrik.** `MAX_ACCEL_KMH_PER_S = 8` (trip-stats.ts) frenlemeyi de reddediyor; sert frende hız yüksek değerde kilitleniyor. Yavaşlama için ~15, hızlanma için ~6 ayrı eşik.
@@ -23,6 +24,7 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ✅ 11. **`GAP_DT` (90 sn) sonrası hız GPS hızına sıçrıyor**, EMA sıfırlanmıyor; kısa bir "kalibre ediliyor" durumu gösterilmeli.
 
 ## B. PeerJS / bağlantı dayanıklılığı
+
 - 🟡 12. **Sabit tek `DRIVER_PEER_ID`.** İki cihaz/sekme kilitlenmeye yol açıyor; oturum kimliği (plaka+tarih+rastgele) + yolcuya kimlik keşfi (küçük bir liste/ilan kanalı) daha sağlam.
 - ✅ 13. **`beforeunload`/`pagehide`'da `peer.destroy()` yok.** Kimlik sunucuda 1–2 dk asılı kalıyor, şoför "kimlik devralınıyor…" ekranında bekliyor.
 - ✅ 14. **Yolcuda `peer.on("disconnected")` → `peer.reconnect()` yok.** Signaling düşünce `peer.connect()` sessizce başarısız oluyor, sonsuz "bağlanıyor".
@@ -34,9 +36,10 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ✅ 20. **Ölçeklenme:** her yolcu ayrı WebRTC bağlantısı; 15+ yolcuda şoför telefonu ısınıyor ve paket kaybı artıyor. Yayın periyodu + delta + duruşta seyreltme şart (bkz. E).
 
 ## C. Radyo (sonradan giren yolcu, ses güvenilirliği)
+
 - ✅ 21. **`callEveryone()` her `play`/jingle'da yeniden `peer.call` yapıyor** (`DriverRadio.tsx:86`) → aynı yolcuya birden çok MediaConnection; eskiler kapatılmıyor: çift ses/eko, bellek sızıntısı. Peer başına tek aktif call haritası tutulmalı.
 - ✅ 22. **Yolcu tarafında yeni `call` gelince eskisi kapatılmıyor** (`index.tsx:271`), yalnızca `srcObject` üzerine yazılıyor.
-- ✅ 23. **Şoför yayına sonra başlarsa mevcut yolculara call atılmıyor.** `radioStreamRef` oluştuğu anda *tüm* açık bağlantılara call gerekir; şu an sadece yeni bağlanana yapılıyor (`driver.tsx:438`).
+- ✅ 23. **Şoför yayına sonra başlarsa mevcut yolculara call atılmıyor.** `radioStreamRef` oluştuğu anda _tüm_ açık bağlantılara call gerekir; şu an sadece yeni bağlanana yapılıyor (`driver.tsx:438`).
 - ✅ 24. **Sonradan giren yolcu için call yeniden denenmiyor.** İlk call ICE'de düşerse sessizlik kalıcı; 5 sn içinde "stream geldi mi" kontrolü + tekrar çağrı.
 - ✅ 25. **iOS/Safari autoplay:** `<audio muted={!radioOn}>` başlangıçta sessiz, yolcu butona basmazsa hiç duymaz. "Yayın var — sesi açmak için dokun" şeklinde belirgin, kalıcı çağrı gerekir.
 - 🟡 26. **`createMediaElementSource` + `MediaStreamDestination` zinciri iOS Safari'de sessiz akış üretebiliyor.** Yedek yol: `audioEl.captureStream()` veya sunucu tabanlı (Icecast/HLS) yayın.
@@ -47,6 +50,7 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ✅ 31. **`alarmTone()` her çağrıda yeni `AudioContext` açıyor** (`approach-alert.ts`); iOS'ta birkaç açılıştan sonra tamamen sessizleşiyor. Tek paylaşılan context.
 
 ## D. Durak mesafesi ve uyarı zamanlaması ("erken uyarı" sorunu)
+
 - ✅ 32. **Uyarılar kuş uçuşu (haversine) mesafeye dayalı.** Dolambaçlı güzergâhta 500 m kuş uçuşu = 1,5 km yol → uyarı çok erken. Yol mesafesi (OSRM) veya güzergâh çizgisi üzerinden ölçüm gerekir.
 - ✅ 33. **Sabit metre eşiği yerine ETA (süre) tabanlı uyarı**: "5 dk kaldı / 2 dk kaldı / kapıda". Trafikte 500 m 4 dk, boş yolda 30 sn.
 - ✅ 34. **Yön (bearing) kontrolü yok.** Servis duraktan uzaklaşırken ya da paralel sokaktan geçerken de "geliyor" uyarısı çıkıyor.
@@ -58,40 +62,44 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ✅ 40. **Uyarı geçmişi yok.** Yolcu ekranı arkadayken uyarıyı kaçırırsa iz kalmıyor; "son uyarılar" listesi + saat.
 
 ## E. Veri / batarya (YAPILACAKLAR2'den devreden)
+
 - ✅ 41. Tüm `DayLog` JSON'u her değişimde gönderiliyordu → artık yalnızca değişen alanlar (`journey-delta`) gidiyor; tam paket sadece ilk bağlantıda.
 - ✅ 42. Yayın periyodu duruşta kademeli seyreliyor: hareket 1 sn · duruş 3 sn · 15 sn+ duruş 6 sn · 60 sn+ duruş 10 sn.
 - ✅ 43. IndexedDB yazımı toplu (5 sn'de bir); sekme gizlenince/kapanınca ve sefer bitişinde anında boşaltılıyor.
 
-
 ## F. Güvenlik / servis
+
 - ⬜ 44. **`DRIVER_PASSWORD = "ankara06"` istemci paketinde açık metin.** Herkes şoför paneline girip yayın kimliğini kapabilir ve sahte konum yayınlayabilir. Sunucu tarafı doğrulama / imzalı oturum tokenı gerekir.
 - ⬜ 45. **Yolcudan gelen `alert` paketi doğrulanmıyor** (`driver.tsx:446`): herhangi bir peer şoföre ses/metin gönderip hoparlörü kullanabilir. Zod şeması + peer başına hız sınırı + susturma.
 - ⬜ 46. **Yolcu tarafında gelen paketler şema doğrulaması olmadan state'e yazılıyor** (`index.tsx:222`) — bozuk/kötü niyetli paket ekranı kilitleyebilir.
 - ⬜ 47. **`getBattery` yalnızca Chrome'da var**; "kontak" otomatik başlatma iOS/Firefox'ta sessizce çalışmıyor, kullanıcıya bilgi verilmiyor.
 
 ## G. Kullanıcı deneyimi (üst seviye için)
+
 - ✅ 48. **PWA/Service Worker yok**: tünelde/kapsama boşluğunda sayfa yenilenirse uygulama açılmıyor; offline kabuk + son bilinen konum önbelleği.
 - ✅ 49. **Şoför için "yayın sağlığı" tek bakış paneli**: GPS ±m, fix yaşı, yolcu sayısı, TURN/röle durumu, radyo dinleyen sayısı — tek satırda.
 - ✅ 50. **Yolcu ilk açılış deneyimi**: tek dokunuşla "sesi aç + bildirim izni + durak seç" onboarding; şu an izinler dağınık.
 - ✅ 51. **Erişilebilirlik/okunurluk**: hız ve ETA sürüşte tek elle, güneş altında okunacak kadar büyük değil; gece modu ayrımı zayıf.
 
 ## H. Şoför "çevrimdışı" görünme / yolcu yeniden deneme (yeni tespit – 11.08.2026)
+
 - ✅ 52. **Yolcu bağlantıyı yalnızca bir kez deniyor.** Yolcu sayfayı şoför henüz açmadan açtığında `peer.connect(DRIVER_PEER_ID)` "peer-unavailable" hatası alıyor ve durum kalıcı "çevrimdışı" oluyor. Şoför sonradan girdiğinde yeniden deneme olmadığı için ancak sayfa yenilenirse bağlanıyor. Çözüm: `peer-unavailable` hatasında **sürekli yeniden deneme döngüsü** (3 sn → 5 sn → 10 sn üst sınırlı backoff, sonsuz; sekme gizliyken duraklat, geri dönünce anında tek deneme).
 - ✅ 53. **Presence (varlık) kanalı yok.** Yolcu şoförün çevrimiçi olup olmadığını sadece bağlanmayı denemekten anlıyor. Çözüm: hafif bir "ilan" mekanizması — şoför açıkken 5 sn'de bir `driver-online` yayını (veya Cloud'da `is_live` satırı / Realtime presence). Yolcu bunu görünce hemen bağlanır.
-- ✅ 54. **"Çevrimdışı" durumu ile "bağlantı kurulamıyor" ayrımı yok.** Yolcu ekranı üç ayrı durum göstermeli: *şoför yayında değil* · *yayında, bağlanılıyor (n. deneme)* · *bağlı*. Ayrıca "Tekrar dene" butonu ve "son deneme: 3 sn önce" bilgisi.
+- ✅ 54. **"Çevrimdışı" durumu ile "bağlantı kurulamıyor" ayrımı yok.** Yolcu ekranı üç ayrı durum göstermeli: _şoför yayında değil_ · _yayında, bağlanılıyor (n. deneme)_ · _bağlı_. Ayrıca "Tekrar dene" butonu ve "son deneme: 3 sn önce" bilgisi.
 - ✅ 55. **Şoför tarafında `peer.destroy()` yapılmadığı için kimlik asılı kalıyor** (bkz. 13) → yolcu "çevrimiçi" sanıp veri alamıyor (zombie). Presence zaman aşımı (>15 sn paket yoksa çevrimdışı say) gerekli.
 - 🟡 56. **Şoför kimliği değişirse yolcu haberi olmuyor** (12 ile birlikte): oturum kimliğine geçilirse yolcunun keşif kanalından yeni kimliği alması şart.
 - ✅ 57. **`visibilitychange` / `online` olaylarında anında yeniden deneme yok.** Telefon uykudan kalkınca veya ağ döndüğünde yolcu 30+ sn boş ekran görüyor.
 
 ## I. Uygulamayı "üst seviye" yapacak ek fikirler
-- ⬜ 58. **Canlı harita üzerinde servis rozeti**: aracın ikonu + yön oku + hız etiketi, durak pinlerinde "kalan süre" balonu.
+
+- ✅ 58. **Canlı harita üzerinde servis rozeti**: aracın ikonu + yön oku + hız etiketi, durak pinlerinde "kalan süre" balonu.
 - ⬜ 59. **"Beni al" / durak seçimi hafızası**: yolcu durağını seçince kalıcı saklanır, açılışta doğrudan "durağınıza 4 dk" ekranı.
 - ⬜ 60. **Sesli/titreşimli akıllı uyandırma**: yolcu telefonu kilitli olsa bile 2 dk kala uyarı (bildirim + ses yedeği, iOS için tam ekran flaş).
 - ⬜ 61. **Sefer geçmişi ve karne**: gün sonunda km, ortalama/zirve hız, durak bekleme süreleri, gecikme grafiği; paylaşılabilir özet.
 - ⬜ 62. **Şoför için tek dokunuş modları**: "Sefer başladı / Mola / Sefer bitti" — GPS, radyo ve yayın periyodu otomatik ayarlanır.
 - ⬜ 63. **Yolcu → şoför hızlı mesajlar**: "Durakta bekliyorum", "Bugün binmiyorum" (hazır butonlar, spam koruması ile) → şoför boş durakta durmaz.
 - ⬜ 64. **Veli/kurum ekranı**: sadece okuma modunda çoklu araç takibi, link ile paylaşım.
-- ⬜ 65. **Bağlantı kalitesi rozeti**: P2P / röle (TURN), gecikme ms, paket yaşı — hem şoförde hem yolcuda tek satır.
+- ✅ 65. **Bağlantı kalitesi rozeti**: P2P / röle (TURN), gecikme ms, paket yaşı — hem şoförde hem yolcuda tek satır.
 - ⬜ 66. **Çevrimdışı kabuk (PWA) + son bilinen konum** (48 ile birlikte): tünelde sayfa yenilenirse en az son durum görünür.
 - ⬜ 67. **Tema ve okunurluk**: gündüz/gece otomatik, sürüş modunda dev hız/ETA tipografisi, tek elle erişilebilir buton yerleşimi.
 - ⬜ 68. **Çoklu güzergâh/araç desteği**: plaka+güzergâh seçimi, her araç için ayrı yayın kimliği.
@@ -99,9 +107,11 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 ---
 
 ### Özet – en çok fayda getirecek 10 madde
+
 1, 2, 3, 4, 5 (hız takılmaları) · 21, 23, 25 (radyo sonradan giren + iOS ses) · 36 (atlanan durak uyarısı) · **52–53 (şoför çevrimdışı görünme / otomatik yakalama)**
 
 ### Güncelleme Günlüğü
+
 - ✅ **A bölümü (1–11) tamamlandı** — 11.08.2026
   - 1: `driver.tsx` içinde 1 sn'lik kalp atışı; son `position` paketi `fixTs` + `ageMs` ile sürekli gönderiliyor.
   - 2: Yolcuda "n sn önce güncellendi"; 10 sn üstünde hız soluklaşıp `—` oluyor, durum "Veri bekleniyor".
@@ -138,7 +148,7 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
 - ✅ **H bölümü (52–55, 57) tamamlandı, 56 beklemede** — 12.08.2026
   - 52: `peer-unavailable` hatasında sonsuz yakalama döngüsü; `waitingRetryDelay()` ile 3s → 5s → 10s (üst sınır), sekme gizliyken duraklıyor.
   - 53: Presence kanıtı olarak gelen her paket (ping/position dâhil) zaman damgalanıyor; şoför açılır açılmaz yolcu kendiliğinden bağlanıyor.
-  - 54: Rozet üç durumu ayırıyor — *Şoför Yayında Değil* · *Bağlanıyor (n. deneme)* · *Canlı*; ayrıca "son deneme: N sn önce" ve **Tekrar dene** butonu.
+  - 54: Rozet üç durumu ayırıyor — _Şoför Yayında Değil_ · _Bağlanıyor (n. deneme)_ · _Canlı_; ayrıca "son deneme: N sn önce" ve **Tekrar dene** butonu.
   - 55: `PRESENCE_TIMEOUT_MS = 15 sn`; bağlantı açık görünse de 15 sn paket yoksa zombie sayılıp kapatılıyor ve yeniden kuruluyor.
   - 56: 🟡 Oturum kimliği keşfi #12 ile birlikte yapılacak (sabit kimlik korunuyor).
   - 57: `visibilitychange` / `online` olayında anında tek deneme (uykudan kalkışta boş ekran yok).
@@ -148,4 +158,3 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal
   - **Yeni:** şoför tarafında `peer.on("disconnected")` → kademeli `peer.reconnect()`, 5 sn'lik nöbetçi ve `online/offline` olayları; ağ dönünce yayın kendini toparlıyor (önceden yalnızca sekme arka plandan dönünce deneniyordu).
   - 50: İlk açılışta tek dokunuşlu kurulum: durak seçimi + ses + bildirim izni birlikte; seçim `localStorage`'da hatırlanıyor.
   - 51: "Büyük Yazı" (sürüş/güneş) modu — ETA ve durak yazıları dev tipografiyle, tercih kalıcı.
-

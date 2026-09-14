@@ -3,12 +3,17 @@ import { useEffect, useState } from "react";
 import { ClientOnly } from "@/components/ClientOnly";
 import { SERVICE_INFO } from "@/lib/service-config";
 import {
+  clearAllDays,
   clockOf,
   clockOfSeconds,
   dayReport,
+  daysToCsv,
+  downloadFile,
   fmtDuration,
   listDays,
+  pruneDays,
   punctuality,
+  todayKey,
   type DayLog,
   type DayReport,
   type PunctualityReport,
@@ -45,12 +50,19 @@ export const Route = createFileRoute("/rapor")({
   ),
 });
 
+type Range = 1 | 7 | 30;
+
 function ReportPage() {
   const [days, setDays] = useState<DayLog[]>([]);
-  const [range, setRange] = useState<7 | 14 | 30>(7);
+  const [range, setRange] = useState<Range>(7);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [openStop, setOpenStop] = useState<string | null>(null);
+
+  const reload = (r: Range) => void listDays(r).then(setDays);
 
   useEffect(() => {
-    void listDays(range).then(setDays);
+    // 30 günden eski kayıtlar kendiliğinden temizlenir
+    void pruneDays(30).then(() => reload(range));
   }, [range]);
 
   const reports: DayReport[] = days.map((d) => dayReport(d));
@@ -63,26 +75,42 @@ function ReportPage() {
   const avgSpeed = totalDriving > 60 ? totalKm / (totalDriving / 3600) : 0;
   const idlePct = totalIgnition > 0 ? (totalIdle / totalIgnition) * 100 : 0;
 
+  const label = range === 1 ? "gunluk" : range === 7 ? "haftalik" : "30-gun";
+
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="border-b border-border bg-card/50 backdrop-blur">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center gap-3">
+      <header className="border-b border-border bg-card/50 backdrop-blur print:hidden">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-wrap items-center gap-3">
           <Link to="/driver" className="hud-label hover:text-primary">
             ← Şoför Paneli
           </Link>
-          <div className="flex-1 text-center">
+          <div className="flex-1 min-w-[120px] text-center">
             <h1 className="text-lg font-bold">SÜRÜŞ RAPORU</h1>
           </div>
           <select
             value={range}
-            onChange={(e) => setRange(Number(e.target.value) as 7 | 14 | 30)}
+            onChange={(e) => setRange(Number(e.target.value) as Range)}
             className="bg-input border border-border rounded-md px-2 py-1.5 text-sm"
             aria-label="Rapor aralığı"
           >
-            <option value={7}>7 gün</option>
-            <option value={14}>14 gün</option>
+            <option value={1}>Günlük</option>
+            <option value={7}>Haftalık (7 gün)</option>
             <option value={30}>30 gün</option>
           </select>
+          <button
+            onClick={() => downloadFile(`servis-rapor-${label}-${todayKey()}.csv`, daysToCsv(days))}
+            disabled={days.length === 0}
+            className="text-sm px-3 py-1.5 rounded-md bg-primary text-primary-foreground font-semibold disabled:opacity-40"
+          >
+            CSV indir
+          </button>
+          <button
+            onClick={() => window.print()}
+            disabled={days.length === 0}
+            className="text-sm px-3 py-1.5 rounded-md border border-border hover:bg-muted/50 disabled:opacity-40"
+          >
+            PDF / Yazdır
+          </button>
         </div>
       </header>
 
@@ -91,6 +119,9 @@ function ReportPage() {
           <div className="hud-label mb-1">Servis</div>
           <div className="font-bold">
             {SERVICE_INFO.vehicle} · {SERVICE_INFO.plate}
+          </div>
+          <div className="text-xs text-muted-foreground mt-1">
+            {days.length} günlük kayıt · en fazla 30 gün saklanır
           </div>
         </div>
 
@@ -119,25 +150,48 @@ function ReportPage() {
                 />
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Duraklara varış saatlerinin günler arası sapması ölçülür. 0 sapma = 100 puan, 15 dk
-                ve üzeri sapma = 0 puan.
+                Her durak kendi ortalama varış saatine göre puanlanır: ≤2 dk sapma 100 · ≤5 dk 95 ·
+                ≤10 dk 85 · ≤15 dk 70 · ≤30 dk 40 · üzeri 0 puan. Genel skor durak puanlarının
+                ortalamasıdır.
               </p>
 
               {punct.stops.length > 0 && (
                 <div className="mt-4 flex flex-col gap-1">
                   {punct.stops.map((s) => (
-                    <div
-                      key={s.stopId}
-                      className="flex items-center justify-between text-xs px-3 py-2 rounded border border-border/60"
-                    >
-                      <span className="font-semibold truncate mr-2">{s.name}</span>
-                      <span className="font-mono text-muted-foreground">
-                        ORT. {clockOfSeconds(s.medianSeconds)} · ±{fmtDuration(s.deviationSeconds)}{" "}
-                        · {s.samples} gün
-                      </span>
-                      <span className="font-mono font-bold text-primary ml-2">
-                        {s.samples >= 2 ? s.score : "—"}
-                      </span>
+                    <div key={s.stopId} className="rounded border border-border/60">
+                      <button
+                        onClick={() => setOpenStop(openStop === s.stopId ? null : s.stopId)}
+                        className="w-full grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 text-xs px-3 py-2 text-left hover:bg-muted/40"
+                      >
+                        <span className="font-semibold truncate">{s.name}</span>
+                        <span className="font-mono text-muted-foreground whitespace-nowrap">
+                          ORT. {clockOfSeconds(s.medianSeconds)} · ±
+                          {fmtDuration(s.deviationSeconds)} · BEKLEME{" "}
+                          {fmtDuration(s.avgDwellSeconds)} · {s.samples} gün
+                        </span>
+                        <span className="font-mono font-bold text-primary">
+                          {s.samples >= 2 ? s.score : "—"}
+                        </span>
+                      </button>
+                      {openStop === s.stopId && (
+                        <div className="border-t border-border/60 p-3 flex flex-col gap-1">
+                          {s.days.map((d) => (
+                            <div
+                              key={d.date}
+                              className="grid grid-cols-4 gap-2 text-[11px] font-mono"
+                            >
+                              <span>{d.date}</span>
+                              <span>{clockOfSeconds(d.seconds)}</span>
+                              <span className="text-muted-foreground">
+                                bekleme {fmtDuration(d.dwellSeconds)}
+                              </span>
+                              <span className="text-primary font-bold text-right">
+                                {d.score} puan
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -165,9 +219,62 @@ function ReportPage() {
                       <Cell label="Mola" value={fmtDuration(r.breakSeconds)} />
                       <Cell label="Durak" value={String(r.arrivals.length)} />
                     </div>
+                    {r.arrivals.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {r.arrivals
+                          .slice()
+                          .sort((a, b) => a.ts - b.ts)
+                          .map((a) => (
+                            <span
+                              key={a.stopId}
+                              className="text-[11px] font-mono px-2 py-1 rounded border border-border/60"
+                            >
+                              {a.name}: {clockOf(a.ts)} · bekleme {fmtDuration(a.dwellSeconds ?? 0)}
+                            </span>
+                          ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
+            </div>
+
+            <div className="panel p-5 print:hidden">
+              <div className="hud-label mb-3">Kayıtları Sıfırla</div>
+              {!confirmReset ? (
+                <button
+                  onClick={() => setConfirmReset(true)}
+                  className="text-sm px-4 py-2.5 rounded-lg border border-destructive/50 text-destructive hover:bg-destructive/10 font-semibold"
+                >
+                  Tüm rapor kayıtlarını sıfırla
+                </button>
+              ) : (
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-sm text-muted-foreground">
+                    Tüm günlerin verisi silinecek. Emin misin?
+                  </span>
+                  <button
+                    onClick={() => {
+                      void clearAllDays().then(() => {
+                        setConfirmReset(false);
+                        reload(range);
+                      });
+                    }}
+                    className="text-sm px-4 py-2.5 rounded-lg bg-destructive text-destructive-foreground font-semibold"
+                  >
+                    Evet, sıfırla
+                  </button>
+                  <button
+                    onClick={() => setConfirmReset(false)}
+                    className="text-sm px-4 py-2.5 rounded-lg border border-border hover:bg-muted/50"
+                  >
+                    Vazgeç
+                  </button>
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground mt-2">
+                Sıfırlamadan önce CSV indirmen önerilir; silinen veriler geri gelmez.
+              </p>
             </div>
           </>
         )}

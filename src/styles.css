@@ -235,7 +235,8 @@
   font-family: var(--font-display);
 }
 .leaflet-tile {
-  filter: brightness(0.72) invert(1) contrast(0.92) hue-rotate(190deg) saturate(0.35) brightness(0.82);
+  filter: brightness(0.72) invert(1) contrast(0.92) hue-rotate(190deg) saturate(0.35)
+    brightness(0.82);
 }
 .leaflet-control-attribution {
   background: oklch(0.21 0.012 260 / 0.8) !important;
@@ -274,6 +275,120 @@
   justify-content: center;
   filter: drop-shadow(0 6px 10px oklch(0 0 0 / 0.65));
   animation: pulse-ring 2s ease-out infinite;
+}
+
+/* YAPILACAKLAR3 #58: canlı harita servis rozeti (yön oku + hız etiketi) */
+.map-bus-badge {
+  position: relative;
+  display: flex;
+  width: 54px;
+  height: 54px;
+  align-items: center;
+  justify-content: center;
+}
+
+.map-bus-badge .map-bus-marker {
+  width: 34px;
+  height: 34px;
+}
+
+.map-bus-arrow {
+  position: absolute;
+  inset: 0;
+  display: block;
+  transform-origin: 50% 50%;
+  transition: transform 0.4s ease-out;
+  filter: drop-shadow(0 0 6px oklch(0.75 0.15 230 / 0.85));
+}
+
+/* Araç görseli modu: yöne göre dönen servis aracı */
+.map-bus-vehicle {
+  display: flex;
+  width: 52px;
+  height: 52px;
+  align-items: center;
+  justify-content: center;
+  transform-origin: 50% 50%;
+  transition: transform 0.5s ease-out;
+  filter: drop-shadow(0 6px 10px oklch(0 0 0 / 0.65));
+}
+
+.map-bus-vehicle img {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+}
+
+/* Durum halkası: hareket = yeşil, duruş = kırmızı yanıp sönen */
+.map-bus-ring {
+  position: absolute;
+  inset: 4px;
+  border-radius: 9999px;
+  border: 3px solid;
+  pointer-events: none;
+}
+
+.map-bus-ring.is-moving {
+  border-color: #16a34a;
+  background: oklch(0.72 0.19 145 / 0.22);
+  box-shadow: 0 0 10px oklch(0.72 0.19 145 / 0.6);
+}
+
+.map-bus-ring.is-stopped {
+  border-color: #dc2626;
+  background: oklch(0.63 0.24 29 / 0.28);
+  animation: bus-ring-blink 1.1s ease-in-out infinite;
+}
+
+@keyframes bus-ring-blink {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 12px oklch(0.63 0.24 29 / 0.7);
+  }
+  50% {
+    opacity: 0.25;
+    box-shadow: 0 0 2px oklch(0.63 0.24 29 / 0.2);
+  }
+}
+
+.map-bus-speed {
+  position: absolute;
+  bottom: -14px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-foreground);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  box-shadow: 0 2px 6px oklch(0 0 0 / 0.5);
+}
+
+/* #58: durak pinlerinde "kalan süre" balonu */
+.map-eta-bubble {
+  padding: 1px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 9999px;
+  background: var(--color-card);
+  color: var(--color-foreground);
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 2px 6px oklch(0 0 0 / 0.5);
+}
+
+.map-eta-bubble.is-selected {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.map-eta-bubble::before {
+  display: none;
 }
 
 .service-road-route,

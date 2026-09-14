@@ -133,6 +133,49 @@ export function tryIceRestart(conn: unknown): boolean {
   }
 }
 
+// ---------- #65: bağlantı kalitesi (gecikme + taşıma yolu) ----------
+export type TransportKind = "unknown" | "p2p" | "relay";
+
+export interface ConnectionQuality {
+  /** Seçili ICE aday çiftinin gidiş-dönüş süresi (ms) — yoksa null. */
+  rttMs: number | null;
+  /** Doğrudan (p2p) mı yoksa TURN rölesi üzerinden mi akıyor. */
+  transport: TransportKind;
+}
+
+/**
+ * Açık bir bağlantının anlık kalitesini WebRTC istatistiklerinden okur.
+ * Protokolde değişiklik gerektirmez; her iki taraf da kullanabilir.
+ */
+export async function readConnectionQuality(conn: unknown): Promise<ConnectionQuality> {
+  const empty: ConnectionQuality = { rttMs: null, transport: "unknown" };
+  const pc = getPeerConnection(conn);
+  if (!pc?.getStats) return empty;
+  try {
+    const stats = await pc.getStats();
+    type StatRow = Record<string, unknown> & { id: string; type: string };
+    const byId = new Map<string, StatRow>();
+    stats.forEach((r: StatRow) => byId.set(r.id, r));
+    let pair: Record<string, unknown> | null = null;
+    stats.forEach((r: StatRow) => {
+      if (r.type === "candidate-pair" && (r.selected || r.state === "succeeded")) {
+        if (!pair || r.selected || (r.bytesReceived ?? 0) > (pair.bytesReceived ?? 0)) pair = r;
+      }
+    });
+    if (!pair) return empty;
+    const rtt =
+      typeof pair.currentRoundTripTime === "number"
+        ? Math.round(pair.currentRoundTripTime * 1000)
+        : null;
+    const local = byId.get(pair.localCandidateId);
+    const remote = byId.get(pair.remoteCandidateId);
+    const relayed = local?.candidateType === "relay" || remote?.candidateType === "relay";
+    return { rttMs: rtt, transport: relayed ? "relay" : "p2p" };
+  } catch {
+    return empty;
+  }
+}
+
 // ---------- #18: TURN (röle) erişilebilirlik testi ----------
 export type RelayStatus = "unknown" | "checking" | "ok" | "unavailable";
 

@@ -10,7 +10,11 @@ export interface IgnitionSession {
 export interface StopArrival {
   stopId: string;
   name: string;
-  ts: number; // ms epoch
+  ts: number; // ms epoch (ilk varış)
+  /** Durak alanında son görüldüğü an (bekleme süresi hesabı) */
+  lastSeen?: number;
+  /** Durak alanında geçirilen toplam süre (saniye) */
+  dwellSeconds?: number;
 }
 
 export interface DayLog {
@@ -189,10 +193,31 @@ export function closeSession(day: DayLog, ts = Date.now()): DayLog {
   return { ...day, sessions };
 }
 
-/** Aynı durağa gün içinde tek kayıt (ilk varış saati). */
+/** Durak alanında iki fix arası en fazla bu kadar boşluk bekleme sayılır (ms). */
+const DWELL_GAP_MS = 5 * 60 * 1000;
+
+/**
+ * Aynı durağa gün içinde tek varış kaydı (ilk varış saati) + durak alanında
+ * kalınan süre (bekleme). Araç radyus içindeyken her fix'te çağrılır.
+ */
 export function recordArrival(day: DayLog, stopId: string, name: string, ts = Date.now()): DayLog {
-  if (day.arrivals.some((a) => a.stopId === stopId)) return day;
-  return { ...day, arrivals: [...day.arrivals, { stopId, name, ts }] };
+  const idx = day.arrivals.findIndex((a) => a.stopId === stopId);
+  if (idx === -1)
+    return {
+      ...day,
+      arrivals: [...day.arrivals, { stopId, name, ts, lastSeen: ts, dwellSeconds: 0 }],
+    };
+  const cur = day.arrivals[idx]!;
+  const last = cur.lastSeen ?? cur.ts;
+  const gap = ts - last;
+  if (gap <= 0) return day;
+  const arrivals = [...day.arrivals];
+  arrivals[idx] = {
+    ...cur,
+    lastSeen: ts,
+    dwellSeconds: (cur.dwellSeconds ?? 0) + (gap <= DWELL_GAP_MS ? gap / 1000 : 0),
+  };
+  return { ...day, arrivals };
 }
 
 /** Yolculara gönderilen tam anlık görüntü (yalnızca ilk bağlantıda / periyodik senkron) */
@@ -313,13 +338,23 @@ export function secondsOfDay(ts: number): number {
   return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
 }
 
+export interface PunctualityDay {
+  date: string;
+  seconds: number; // varış saati (saniye-of-day)
+  deltaSeconds: number; // referans saatten sapma (mutlak)
+  dwellSeconds: number;
+  score: number;
+}
+
 export interface PunctualityStop {
   stopId: string;
   name: string;
   medianSeconds: number;
   samples: number;
   deviationSeconds: number; // ortalama mutlak sapma
+  avgDwellSeconds: number;
   score: number; // 0-100
+  days: PunctualityDay[];
 }
 
 export interface PunctualityReport {
@@ -334,30 +369,62 @@ function median(list: number[]): number {
 }
 
 /**
- * Düzenlilik skoru: her durağın varış saatinin günler arası sapması.
- * 0 sn sapma = 100 puan, 15 dk ve üzeri sapma = 0 puan.
+ * Tek bir varışın puanı: durağın kendi ortalama (medyan) saatinden sapma.
+ * ≤2 dk = 100 · ≤5 dk = 95 · ≤10 dk = 85 · ≤15 dk = 70 · ≤30 dk = 40 · üstü = 0
  */
+export function arrivalScore(deltaSeconds: number): number {
+  const m = Math.abs(deltaSeconds) / 60;
+  if (m <= 2) return 100;
+  if (m <= 5) return 95;
+  if (m <= 10) return 85;
+  if (m <= 15) return 70;
+  if (m <= 30) return 40;
+  return 0;
+}
+
+/** Düzenlilik skoru: her durak kendi ortalama varış saatine göre puanlanır. */
 export function punctuality(days: DayLog[]): PunctualityReport {
-  const byStop = new Map<string, { name: string; times: number[] }>();
+  const byStop = new Map<
+    string,
+    { name: string; rows: { date: string; seconds: number; dwellSeconds: number }[] }
+  >();
   days.forEach((d) =>
     d.arrivals.forEach((a) => {
-      const cur = byStop.get(a.stopId) ?? { name: a.name, times: [] };
-      cur.times.push(secondsOfDay(a.ts));
+      const cur = byStop.get(a.stopId) ?? { name: a.name, rows: [] };
+      cur.name = a.name;
+      cur.rows.push({
+        date: d.date,
+        seconds: secondsOfDay(a.ts),
+        dwellSeconds: Math.round(a.dwellSeconds ?? 0),
+      });
       byStop.set(a.stopId, cur);
     }),
   );
-  const MAX_DEV = 15 * 60;
   const stops: PunctualityStop[] = [];
   byStop.forEach((v, stopId) => {
-    const med = median(v.times);
-    const dev = v.times.reduce((a, t) => a + Math.abs(t - med), 0) / v.times.length;
+    const times = v.rows.map((r) => r.seconds);
+    const med = median(times);
+    const dev = times.reduce((a, t) => a + Math.abs(t - med), 0) / times.length;
+    const dayRows: PunctualityDay[] = v.rows
+      .map((r) => ({
+        date: r.date,
+        seconds: r.seconds,
+        deltaSeconds: Math.round(Math.abs(r.seconds - med)),
+        dwellSeconds: r.dwellSeconds,
+        score: arrivalScore(r.seconds - med),
+      }))
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
     stops.push({
       stopId,
       name: v.name,
       medianSeconds: med,
-      samples: v.times.length,
+      samples: times.length,
       deviationSeconds: dev,
-      score: Math.round(Math.max(0, 1 - dev / MAX_DEV) * 100),
+      avgDwellSeconds: Math.round(
+        v.rows.reduce((a, r) => a + r.dwellSeconds, 0) / Math.max(1, v.rows.length),
+      ),
+      score: Math.round(dayRows.reduce((a, r) => a + r.score, 0) / dayRows.length),
+      days: dayRows,
     });
   });
   stops.sort((a, b) => a.medianSeconds - b.medianSeconds);
@@ -366,6 +433,125 @@ export function punctuality(days: DayLog[]): PunctualityReport {
     ? Math.round(scored.reduce((a, s) => a + s.score, 0) / scored.length)
     : 0;
   return { score, stops };
+}
+
+// ---------- bakım ----------
+/** 30 günden (varsayılan) eski kayıtları siler; kalan gün sayısını döner. */
+export async function pruneDays(keepDays = 30): Promise<number> {
+  const all = await listDays(9999);
+  const cutoff = todayKey(new Date(Date.now() - keepDays * 86400000));
+  const old = all.filter((d) => d.date < cutoff);
+  if (old.length) {
+    try {
+      const db = await openDb();
+      const tx = db.transaction(STORE, "readwrite");
+      old.forEach((d) => tx.objectStore(STORE).delete(d.date));
+    } catch {
+      /* ignore */
+    }
+  }
+  return all.length - old.length;
+}
+
+/** Tüm günlük kayıtları siler (sıfırla). */
+export async function clearAllDays(): Promise<void> {
+  try {
+    const db = await openDb();
+    db.transaction(STORE, "readwrite").objectStore(STORE).clear();
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------- CSV dışa aktarma ----------
+function csvCell(v: string | number): string {
+  const s = String(v);
+  return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function csvOf(rows: (string | number)[][]): string {
+  // Excel (TR) ayırıcı olarak noktalı virgül bekler
+  return `\uFEFF${rows.map((r) => r.map(csvCell).join(";")).join("\r\n")}`;
+}
+
+/** Günlük özet + durak bazlı varış/bekleme kayıtlarını tek CSV'de üretir. */
+export function daysToCsv(days: DayLog[]): string {
+  const rows: (string | number)[][] = [
+    ["GÜNLÜK ÖZET"],
+    [
+      "Tarih",
+      "KM",
+      "Kontak Açık",
+      "Hareket",
+      "Rölanti",
+      "Ort. Hız (km/s)",
+      "Sefer",
+      "Mola",
+      "Durak Sayısı",
+      "İlk Hareket",
+    ],
+  ];
+  const sorted = [...days].sort((a, b) => (a.date < b.date ? 1 : -1));
+  sorted.forEach((d) => {
+    const r = dayReport(d);
+    rows.push([
+      r.date,
+      r.km.toFixed(2).replace(".", ","),
+      fmtDuration(r.ignitionSeconds),
+      fmtDuration(r.drivingSeconds),
+      fmtDuration(r.idleSeconds),
+      Math.round(r.avgSpeedKmh),
+      r.trips,
+      fmtDuration(r.breakSeconds),
+      r.arrivals.length,
+      r.firstStart ? clockOf(r.firstStart) : "-",
+    ]);
+  });
+
+  const punct = punctuality(sorted);
+  rows.push([], ["DURAK BAZLI VARIŞ / BEKLEME"]);
+  rows.push(["Tarih", "Durak", "Varış Saati", "Bekleme Süresi", "Ortalama Saat", "Sapma", "Puan"]);
+  punct.stops.forEach((s) =>
+    s.days.forEach((d) =>
+      rows.push([
+        d.date,
+        s.name,
+        clockOfSeconds(d.seconds),
+        fmtDuration(d.dwellSeconds),
+        clockOfSeconds(s.medianSeconds),
+        fmtDuration(d.deltaSeconds),
+        d.score,
+      ]),
+    ),
+  );
+
+  rows.push([], ["DURAK DÜZENLİLİK SKORU"]);
+  rows.push(["Durak", "Ortalama Saat", "Gün Sayısı", "Ort. Sapma", "Ort. Bekleme", "Puan"]);
+  punct.stops.forEach((s) =>
+    rows.push([
+      s.name,
+      clockOfSeconds(s.medianSeconds),
+      s.samples,
+      fmtDuration(s.deviationSeconds),
+      fmtDuration(s.avgDwellSeconds),
+      s.score,
+    ]),
+  );
+  rows.push([], ["GENEL DÜZENLİLİK SKORU", punct.score]);
+  return csvOf(rows);
+}
+
+/** Tarayıcıda dosya indirir. */
+export function downloadFile(name: string, content: string, mime = "text/csv;charset=utf-8"): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** Saniye-of-day → HH:MM:SS */

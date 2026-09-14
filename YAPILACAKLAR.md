@@ -6,34 +6,41 @@ Sıra yukarıdan aşağı. Her adım öncesi onay alınır, biten adım ✅ ile 
 Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal (istenmedi)
 
 ## 1. GPS hız filtresi – dur/kalk sorunu ✅
+
 - ✅ 1.1 `noiseFloor` eşiği düşürüldü: `Math.max(4, (acc1+acc2)*0.4)`
 - ✅ 1.2 `MAX_DT` 30 → 600 sn (10 dk bekleme toleransı)
 - ✅ 1.3 Uzun bekleme sonrası ilk fix'te GPS'in kendi hızı doğrudan kullanılıyor
 - ✅ 1.4 `SPEED_SMOOTHING` 0.35 → 0.45 (daha hızlı tepki)
 
 ## 2. Hız tavanı ✅
+
 - ✅ 2.1 `MAX_PLAUSIBLE_KMH` 110 → 160 (gerçek hız kırpılmıyor)
 
 ## 3. Stabil hız / km gösterimi ✅
+
 - ✅ 3.1 Anlık hız, ortalama hız, toplam km ve zirve hız hem şoför hem yolcu panelinde aynı kaynaktan gösteriliyor
 
 ## 4. Servis Radyosu (USB müzik + PeerJS) ✅
+
 - ✅ 4.1 Şoför paneli: dosya seçici ile çalma listesi (USB'den kopyalanan MP3'ler)
 - ✅ 4.2 Web Audio → MediaStreamDestination → `peer.call()` ile yolculara canlı yayın
 - ✅ 4.3 Yolcu paneli: gelen stream'i çal, "Şu an çalıyor" kartı + ses aç/kapa
 - ✅ 4.4 Kontroller: oynat/duraklat/önceki/sonraki/ses, şarkı bitince otomatik geçiş
 
 ## 5. Jingle & Anonslar ✅
+
 - ✅ 5.1 Her 2-3 şarkıda bir "Elektro Radyo" jingle (sıklık ayarlanabilir: 2/3/4/5)
 - ✅ 5.2 Saat başı TTS anonsu ("Saat 09:00, Acrob Servis Radyosu")
 
 ## 6. Bilgi Yarışması / Düello ⛔ (şimdilik ertelendi – aciliyeti yok)
+
 - ⬜ 6.1 Şoför soruyu yayınlar, yolcular şıkla cevaplar, geri sayım
 - ⬜ 6.2 Hız bonusu + streak bonusu ile puanlama
 - ⬜ 6.3 Canlı skor tablosu, günlük/haftalık liderlik, durak bazlı skor
 - ⬜ 6.4 Düello modu (iki yolcu birebir, 5 soru)
 
 ## 7. Hareket Saati (Battery API "kontak" hack'i) ✅
+
 - ✅ 7.1 Şarj başladı = kontak açık → hareket saati kaydı (IndexedDB, günlük)
 - ✅ 7.2 Şarj kesildi = duruş; sefer süresi, sefer sayısı, mola süreleri (ss:dd:sn)
 - ✅ 7.3 Sağ üst 3 çizgi → "Veriler" panelinde hem şoför hem yolcuda gösterim
@@ -43,40 +50,47 @@ Durum: ⬜ bekliyor · 🟡 devam ediyor · ✅ tamamlandı · ⛔ iptal (istenm
 - ✅ 7.7 Kontak açılınca (telefon şarja girince) yayın otomatik başlıyor – panelden açılıp kapatılabilir
 
 ## 8. Kurumsal Raporlar ✅
+
 - ✅ 8.1 Rölanti süresi/oranı, ortalama hız, durak bazlı düzenlilik skoru
 - ✅ 8.2 Haftalık sürüş raporu ekranı (`/rapor`, 7/14/30 gün seçimi + günlük döküm)
 
 ## 9. "Servis Geliyor" Uyarısı ✅
+
 - ✅ 9.1 500 m kala titreşim, 200 m kala alarm + bildirim
 
-
 ## 10. Ek Deneyim Özellikleri
+
 - ✅ 10.1 Otomatik durak anonsu (TTS + GPS yakınlık) – 350 m, durak başına bir kez
 - ✅ 10.2 Ani fren algılama (ivmeölçer + GPS hız düşüşü yedeği)
 - ⛔ 10.3 QR kod ile biniş (istenmedi)
 
-
 ## 11. PWA – Native Görünüm (şimdilik atlandı, sonra dönülecek)
+
 - ⬜ 11.1 `manifest.json` + standalone tam ekran, ikon, splash
 - ⬜ 11.2 Alt navigasyon barı (Takip / Radyo / Şoför / Duraklar)
 - ⬜ 11.3 Parmakla sağa-sola geçiş (swipe), kaydırma barı gizli
 
 ## 12. 3D Harita ✅
+
 - ✅ 12.1 Leaflet → MapLibre GL JS geçişi (3D binalar, pitch/bearing)
 
 ## 13. Hava Durumu ✅
+
 - ✅ 13.1 Open-Meteo (anahtarsız, ücretsiz) ile güzergâh hava durumu
 
 ## 14. Geçilen Durak/Rota Temizliği ✅
+
 - ✅ 14.1 Hassas "tam varış" (GPS doğruluğuna göre 15-35 m) + duraktan uzaklaşma şartıyla "geçildi"; durak ve geçilen rota parçası haritadan otomatik siliniyor
 
 ## 15. Kopma Sonrası Devam ✅
+
 - ✅ 15.1 Son geçilen durak IndexedDB'ye kaydediliyor
 - ✅ 15.2 Yeniden yayında "Kaldığım yerden devam et / Baştan başla" seçeneği
 
 ---
 
 ### Güncelleme Günlüğü
+
 - ✅ Adım 1 + 2 tamamlandı — `src/lib/trip-stats.ts`: dur/kalk sonrası hız artık "Sıfırla" butonuna basmadan güncelleniyor, 110 km/s tavanı 160'a çıkarıldı.
 - ✅ Adım 3 tamamlandı — anlık/ortalama/toplam km zaten aynı filtreden geliyordu; eksik olan zirve hız da yolculara yayınlanıp panelde gösterildi.
 - ✅ Adım 4 tamamlandı — `src/components/DriverRadio.tsx` (şoför çalma listesi + canlı yayın), `src/lib/radio.ts` (radyo durum paketi), yolcu panelinde "Şu an çalıyor" kartı, ses açma ve seviye ayarı. Yayına sonradan katılan yolcular da otomatik bağlanıyor.

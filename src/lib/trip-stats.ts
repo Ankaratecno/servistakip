@@ -3,7 +3,6 @@ export interface TripStats {
   totalMeters: number;
   movingSeconds: number; // hareket halinde geçen süre
   maxSpeedKmh: number;
-  avgSpeedKmh: number; // canlı ortalama hız (HUD sayacı için)
   startedAt: number;
   updatedAt: number;
 }
@@ -16,7 +15,6 @@ export const EMPTY_STATS: TripStats = {
   totalMeters: 0,
   movingSeconds: 0,
   maxSpeedKmh: 0,
-  avgSpeedKmh: 0,
   startedAt: Date.now(),
   updatedAt: Date.now(),
 };
@@ -256,11 +254,9 @@ export function ingestFix(stats: TripStats, state: FilterState, fix: FixInput): 
     totalMeters: stats.totalMeters + dm,
     movingSeconds: stats.movingSeconds + movingDelta,
     maxSpeedKmh: Math.max(stats.maxSpeedKmh, nextMax),
-    avgSpeedKmh: 0,
     startedAt: stats.startedAt || fix.ts,
     updatedAt: fix.ts,
   };
-  next.avgSpeedKmh = avgSpeedKmh(next);
   state.lastFix = fix;
   return { stats: next, speedKmh: state.smoothedKmh, accepted: true, calibrating: calibrating() };
 }

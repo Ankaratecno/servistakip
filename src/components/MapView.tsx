@@ -15,8 +15,6 @@ export interface MapViewProps {
   busHeading?: number | null;
   /** #58: araç rozeti — hız etiketi (km/s) */
   busSpeedKmh?: number | null;
-  /** Yeni: sağ üst HUD sayacında gösterilecek ortalama hız (km/s). */
-  avgSpeedKmh?: number | null;
   /** #58: durak pinlerinde "kalan süre" balonu (durak id → "4 dk") */
   stopEta?: Record<string, string>;
   /** Verilirse varsayılan SVG yerine bu araç görseli kullanılır ve yöne göre döner. */
@@ -105,7 +103,6 @@ export default function MapView({
   onMapClick,
   busHeading = null,
   busSpeedKmh = null,
-  avgSpeedKmh = null,
   stopEta,
   busIconUrl = null,
   active = true,
@@ -145,7 +142,7 @@ export default function MapView({
       preferCanvas: true,
     });
 
-    const tiles = L.tileLayer(TILE_URL, {
+    L.tileLayer(TILE_URL, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19,
       crossOrigin: true,
@@ -191,23 +188,10 @@ export default function MapView({
     return () => {
       observer.disconnect();
       map.off();
-      try {
-        // Canvas renderer'ın kırılımını önlemek için katmanları önce ayır.
-        map.eachLayer((layer) => {
-          try {
-            map.removeLayer(layer);
-          } catch {
-            /* noop */
-          }
-        });
-        tiles.remove();
-        // Bekleyen canvas çizimleri varken remove çağrılırsa Leaflet
-        // "clearRect of undefined" hatası fırlatır; önce animasyonu durdur.
-        map.stop();
-        map.remove();
-      } catch {
-        /* noop */
-      }
+      // Bekleyen canvas çizimleri varken remove çağrılırsa Leaflet
+      // "clearRect of undefined" hatası fırlatır; önce animasyonu durdur.
+      map.stop();
+      map.remove();
       mapRef.current = null;
       stopsLayerRef.current = null;
       routeLayerRef.current = null;
@@ -393,57 +377,9 @@ export default function MapView({
     }, 400);
   };
 
-  const speedValue = Number.isFinite(busSpeedKmh as number) ? Math.round(busSpeedKmh as number) : 0;
-  const avgValue = Number.isFinite(avgSpeedKmh as number)
-    ? (avgSpeedKmh as number).toFixed(1)
-    : "--";
-  const speedLimit = 120;
-  const progressPct = Math.min(100, Math.max(0, (speedValue / speedLimit) * 100));
-
   return (
     <div className={`relative h-full w-full ${className}`}>
       <div ref={containerRef} className="absolute inset-0" />
-      {busPosition && (
-        <div className="absolute right-3 top-3 z-[600] min-w-[200px] select-none rounded-2xl border border-border bg-card/95 p-4 shadow-2xl backdrop-blur-sm">
-          <div className="absolute left-0 top-0 h-1 w-full rounded-t-2xl bg-gradient-to-r from-primary to-cyan-500" />
-          <div className="mb-2 flex items-center gap-2">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-            <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-muted-foreground">
-              Anlık Hız
-            </span>
-          </div>
-          <div className="flex items-baseline justify-center">
-            <span className="text-6xl font-black tabular-nums tracking-tighter text-foreground">
-              {speedValue}
-            </span>
-            <span className="ml-2 text-lg font-bold text-primary">km/s</span>
-          </div>
-          <div className="mt-4 w-full">
-            <div className="mb-1 flex justify-between px-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-              <span>0</span>
-              <span>Limit {speedLimit}</span>
-            </div>
-            <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-primary to-cyan-500 transition-all duration-500 ease-out"
-                style={{ width: `${progressPct}%` }}
-              />
-            </div>
-          </div>
-          <div className="mt-4 flex w-full justify-between border-t border-border/50 pt-3">
-            <div className="flex flex-col">
-              <span className="text-[9px] font-bold uppercase text-muted-foreground">Ortalama</span>
-              <span className="text-xs font-bold text-foreground">{avgValue}</span>
-            </div>
-            <div className="flex flex-col items-end">
-              <span className="text-[9px] font-bold uppercase text-muted-foreground">Durum</span>
-              <span className="text-xs font-bold uppercase tracking-tight text-emerald-500">
-                {speedValue > 0 ? "Hareketli" : "Duruyor"}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
       {busPosition && !following && (
         <button
           type="button"

@@ -1861,7 +1861,6 @@ function DriverApp() {
                   routePath={activeRoutePath}
                   busHeading={liveHeading}
                   busSpeedKmh={liveSpeed}
-                  avgSpeedKmh={stats.avgSpeedKmh}
                   busIconUrl={busDriverIcon}
                   className="h-full min-h-[400px]"
                 />

@@ -28,8 +28,3 @@ export function hourAnnouncementUrl(d = new Date()): string {
 export function requestAnnouncementUrl(): string {
   return fileUrl("istek");
 }
-
-/** Yolcu bindiğinde: "Hayırlı sabahlar, hoş geldiniz. Hayırlı yolculuklar." (URL). */
-export function welcomeAnnouncementUrl(): string {
-  return fileUrl("hosgeldin");
-}

@@ -51,12 +51,13 @@ export function resetAnnounce(state: AnnounceState, stopId: string) {
 }
 
 export function announceText(stopName: string, etaS?: number | null): string {
-  const base = `Sayın yolcular, yaklaşan durağımız ${stopName}.`;
-  if (etaS == null || !isFinite(etaS) || etaS <= 45) {
-    return base;
+  const base = `Sayın yolcular, yaklaşan durağımız ${stopName}`;
+  if (etaS == null || !isFinite(etaS)) {
+    return `${base}. İnecek yolcularımız hazırlansın.`;
   }
+  if (etaS <= 45) return `${base}. Durağa geliyoruz, inecek yolcularımız hazırlansın.`;
   const mins = Math.max(1, Math.round(etaS / 60));
-  return `${base} Tahmini ${mins} dakika. İnecek yolcularımız hazırlansın.`;
+  return `${base}. Tahmini ${mins} dakika. İnecek yolcularımız hazırlansın.`;
 }
 
 // ---------- 10.2 Ani fren algılama ----------

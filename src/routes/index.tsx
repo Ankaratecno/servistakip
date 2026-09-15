@@ -31,7 +31,6 @@ import {
   type VoiceAlertPayload,
 } from "@/lib/voice-alert";
 import { resumeSharedAudio } from "@/lib/audio-context";
-import { welcomeAnnouncementUrl } from "@/lib/voice-assets";
 import { announceText, type BrakeEventPayload, type StopAnnouncePayload } from "@/lib/announce";
 import StopGuessGame from "@/components/StopGuessGame";
 import type { GuessBoardPayload, GuessBoardRow, GuessScorePayload } from "@/lib/guess-game";
@@ -334,21 +333,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     setLastKnown(snap);
     saveLastKnown(snap);
   }, [driver?.lat, driver?.lng]);
-
-  // Yolcu bindi: kendi durağı geçilince "Hayırlı sabahlar, hoş geldiniz" anonsu çalar (bir kez).
-  const welcomedStopRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!selectedStopId || !passedIds.has(selectedStopId)) return;
-    if (welcomedStopRef.current === selectedStopId) return;
-    welcomedStopRef.current = selectedStopId;
-    try {
-      const audio = new Audio(welcomeAnnouncementUrl());
-      audio.volume = 1;
-      void audio.play().catch(() => undefined);
-    } catch {
-      /* ignore */
-    }
-  }, [passedIds, selectedStopId]);
 
   // #59 hazırlığı / #50: seçilen durak hatırlanır
   useEffect(() => {

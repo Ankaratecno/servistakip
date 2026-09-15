@@ -2,6 +2,7 @@
 // parça parça şoföre aktarılır; şoför tarafında sıraya girip anons edilir.
 
 import type { DataConnection } from "peerjs";
+import { saveSong } from "@/lib/song-store";
 
 /** Tek seferde gönderilen ham parça boyutu (base64 öncesi). */
 const CHUNK_BYTES = 24 * 1024;
@@ -155,6 +156,16 @@ export function ingestSongPacket(peerId: string, data: unknown): boolean {
         peerId,
         ts: Date.now(),
       };
+      // Bağlantı kopsa/sayfa yenilense bile istek kaybolmasın diye kalıcı depoya yaz.
+      void saveSong({
+        id: req.id,
+        title: req.title,
+        rider: req.rider,
+        stopName: req.stopName,
+        peerId: req.peerId,
+        ts: req.ts,
+        blob,
+      });
       listeners.forEach((l) => l(req));
     }
     return true;

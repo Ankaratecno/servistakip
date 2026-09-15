@@ -23,3 +23,13 @@ export function hourAnnouncementUrl(d = new Date()): string {
   const hh = String(d.getHours()).padStart(2, "0");
   return fileUrl(`saat-${hh}`);
 }
+
+/** İstek şarkısı anonsu: "Elektro Radyo, istek üzerine çalıyor." (URL). */
+export function requestAnnouncementUrl(): string {
+  return fileUrl("istek");
+}
+
+/** Yolcu bindiğinde: "Hayırlı sabahlar, hoş geldiniz. Hayırlı yolculuklar." (URL). */
+export function welcomeAnnouncementUrl(): string {
+  return fileUrl("hosgeldin");
+}

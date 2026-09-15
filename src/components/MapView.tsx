@@ -15,10 +15,14 @@ export interface MapViewProps {
   busHeading?: number | null;
   /** #58: araç rozeti — hız etiketi (km/s) */
   busSpeedKmh?: number | null;
+  /** Yeni: sağ üst HUD sayacında gösterilecek ortalama hız (km/s). */
+  avgSpeedKmh?: number | null;
   /** #58: durak pinlerinde "kalan süre" balonu (durak id → "4 dk") */
   stopEta?: Record<string, string>;
   /** Verilirse varsayılan SVG yerine bu araç görseli kullanılır ve yöne göre döner. */
   busIconUrl?: string | null;
+  /** Harita sekmesi görünür olduğunda boyutu ve araç odağını yeniler. */
+  active?: boolean;
 }
 
 const TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -101,8 +105,10 @@ export default function MapView({
   onMapClick,
   busHeading = null,
   busSpeedKmh = null,
+  avgSpeedKmh = null,
   stopEta,
   busIconUrl = null,
+  active = true,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -115,6 +121,8 @@ export default function MapView({
   /** Kendi setView/panTo çağrılarımızı kullanıcı hareketinden ayırmak için. */
   const selfMoveRef = useRef(false);
   const hasPositionedRef = useRef(false);
+  /** Araç konumu ilk gelince haritayı bir kez araca kilitlemek için. */
+  const hasBusFocusRef = useRef(false);
   const centerRef = useRef(center);
 
   const stopFollow = () => {
@@ -137,7 +145,7 @@ export default function MapView({
       preferCanvas: true,
     });
 
-    L.tileLayer(TILE_URL, {
+    const tiles = L.tileLayer(TILE_URL, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19,
       crossOrigin: true,
@@ -159,7 +167,22 @@ export default function MapView({
     });
 
     mapRef.current = map;
-    const resize = () => map.invalidateSize({ animate: false });
+    const resize = () => {
+      if (mapRef.current !== map || !container.isConnected) return;
+      if (container.clientWidth === 0 || container.clientHeight === 0) return;
+      map.invalidateSize({ animate: false });
+      // Harita gizli sekmede açılmış olabilir; boyut oturunca aracı yeniden ortala.
+      const pos = busPositionRef.current;
+      if (followRef.current && pos) {
+        selfMoveRef.current = true;
+        map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 16), { animate: false });
+        hasBusFocusRef.current = true;
+        hasPositionedRef.current = true;
+        window.setTimeout(() => {
+          selfMoveRef.current = false;
+        }, 0);
+      }
+    };
     const observer = new ResizeObserver(resize);
     observer.observe(container);
     requestAnimationFrame(resize);
@@ -167,12 +190,30 @@ export default function MapView({
 
     return () => {
       observer.disconnect();
-      map.remove();
+      map.off();
+      try {
+        // Canvas renderer'ın kırılımını önlemek için katmanları önce ayır.
+        map.eachLayer((layer) => {
+          try {
+            map.removeLayer(layer);
+          } catch {
+            /* noop */
+          }
+        });
+        tiles.remove();
+        // Bekleyen canvas çizimleri varken remove çağrılırsa Leaflet
+        // "clearRect of undefined" hatası fırlatır; önce animasyonu durdur.
+        map.stop();
+        map.remove();
+      } catch {
+        /* noop */
+      }
       mapRef.current = null;
       stopsLayerRef.current = null;
       routeLayerRef.current = null;
       busMarkerRef.current = null;
       hasPositionedRef.current = false;
+      hasBusFocusRef.current = false;
     };
   }, []);
 
@@ -213,11 +254,38 @@ export default function MapView({
     if (!busPositionRef.current && stops.length > 0 && !hasPositionedRef.current) {
       const bounds = L.latLngBounds(stops.map((stop) => [stop.lat, stop.lng] as L.LatLngTuple));
       if (bounds.isValid()) {
+        // Bu otomatik yakınlaştırma kullanıcı hareketi değildir; araç takibini kapatmamalı.
+        selfMoveRef.current = true;
         map.fitBounds(bounds, { padding: [36, 36], maxZoom: 14, animate: false });
         hasPositionedRef.current = true;
+        window.setTimeout(() => {
+          selfMoveRef.current = false;
+        }, 0);
       }
     }
   }, [stops, selectedStopId]);
+
+  // Yolcu haritası önce gizli sekmede kurulur. Sekme açılınca Leaflet'in gerçek
+  // ölçüyü almasını sağla ve canlı araç varsa görünümü kesin olarak araca taşı.
+  useEffect(() => {
+    if (!active) return;
+    const frame = window.requestAnimationFrame(() => {
+      const map = mapRef.current;
+      const container = containerRef.current;
+      if (!map || !container || container.clientWidth === 0 || container.clientHeight === 0) return;
+      map.invalidateSize({ animate: false });
+      const pos = busPositionRef.current;
+      if (!pos || !followRef.current) return;
+      selfMoveRef.current = true;
+      map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 16), { animate: false });
+      hasBusFocusRef.current = true;
+      hasPositionedRef.current = true;
+      window.setTimeout(() => {
+        selfMoveRef.current = false;
+      }, 0);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active]);
 
   // #58: kalan süre balonları pinleri yeniden çizmeden güncellenir.
   useEffect(() => {
@@ -298,9 +366,11 @@ export default function MapView({
 
     if (followRef.current) {
       selfMoveRef.current = true;
-      if (!hasPositionedRef.current) {
-        // İlk konumda bir kez yakınlaş; sonrasında kullanıcının zoom'una dokunma.
+      if (!hasBusFocusRef.current) {
+        // Araç konumu ilk gelince (duraklara göre çerçevelenmiş olsa bile)
+        // harita doğrudan araca kilitlenir.
         map.setView(point, Math.max(map.getZoom(), 16), { animate: false });
+        hasBusFocusRef.current = true;
         hasPositionedRef.current = true;
       } else {
         map.panTo(point, { animate: false });
@@ -323,9 +393,57 @@ export default function MapView({
     }, 400);
   };
 
+  const speedValue = Number.isFinite(busSpeedKmh as number) ? Math.round(busSpeedKmh as number) : 0;
+  const avgValue = Number.isFinite(avgSpeedKmh as number)
+    ? (avgSpeedKmh as number).toFixed(1)
+    : "--";
+  const speedLimit = 120;
+  const progressPct = Math.min(100, Math.max(0, (speedValue / speedLimit) * 100));
+
   return (
     <div className={`relative h-full w-full ${className}`}>
       <div ref={containerRef} className="absolute inset-0" />
+      {busPosition && (
+        <div className="absolute right-3 top-3 z-[600] min-w-[200px] select-none rounded-2xl border border-border bg-card/95 p-4 shadow-2xl backdrop-blur-sm">
+          <div className="absolute left-0 top-0 h-1 w-full rounded-t-2xl bg-gradient-to-r from-primary to-cyan-500" />
+          <div className="mb-2 flex items-center gap-2">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+            <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-muted-foreground">
+              Anlık Hız
+            </span>
+          </div>
+          <div className="flex items-baseline justify-center">
+            <span className="text-6xl font-black tabular-nums tracking-tighter text-foreground">
+              {speedValue}
+            </span>
+            <span className="ml-2 text-lg font-bold text-primary">km/s</span>
+          </div>
+          <div className="mt-4 w-full">
+            <div className="mb-1 flex justify-between px-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+              <span>0</span>
+              <span>Limit {speedLimit}</span>
+            </div>
+            <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-primary to-cyan-500 transition-all duration-500 ease-out"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          </div>
+          <div className="mt-4 flex w-full justify-between border-t border-border/50 pt-3">
+            <div className="flex flex-col">
+              <span className="text-[9px] font-bold uppercase text-muted-foreground">Ortalama</span>
+              <span className="text-xs font-bold text-foreground">{avgValue}</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span className="text-[9px] font-bold uppercase text-muted-foreground">Durum</span>
+              <span className="text-xs font-bold uppercase tracking-tight text-emerald-500">
+                {speedValue > 0 ? "Hareketli" : "Duruyor"}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
       {busPosition && !following && (
         <button
           type="button"

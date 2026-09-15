@@ -156,22 +156,20 @@ export async function readConnectionQuality(conn: unknown): Promise<ConnectionQu
     type StatRow = Record<string, unknown> & { id: string; type: string };
     const byId = new Map<string, StatRow>();
     stats.forEach((r: StatRow) => byId.set(r.id, r));
-    const pairs: StatRow[] = [];
+    let pair: Record<string, unknown> | null = null;
     stats.forEach((r: StatRow) => {
-      if (r.type === "candidate-pair" && (r.selected || r.state === "succeeded")) pairs.push(r);
+      if (r.type === "candidate-pair" && (r.selected || r.state === "succeeded")) {
+        if (!pair || r.selected || (r.bytesReceived ?? 0) > (pair.bytesReceived ?? 0)) pair = r;
+      }
     });
-    const num = (v: unknown) => (typeof v === "number" ? v : 0);
-    const best = pairs.sort(
-      (a, b) =>
-        Number(!!b.selected) - Number(!!a.selected) || num(b.bytesReceived) - num(a.bytesReceived),
-    )[0];
-    if (!best) return empty;
+    if (!pair) return empty;
+    const selectedPair = pair as Record<string, unknown>;
     const rtt =
-      typeof best.currentRoundTripTime === "number"
-        ? Math.round(best.currentRoundTripTime * 1000)
+      typeof selectedPair.currentRoundTripTime === "number"
+        ? Math.round(selectedPair.currentRoundTripTime * 1000)
         : null;
-    const local = byId.get(String(best.localCandidateId ?? ""));
-    const remote = byId.get(String(best.remoteCandidateId ?? ""));
+    const local = byId.get(String(selectedPair.localCandidateId ?? ""));
+    const remote = byId.get(String(selectedPair.remoteCandidateId ?? ""));
     const relayed = local?.candidateType === "relay" || remote?.candidateType === "relay";
     return { rttMs: rtt, transport: relayed ? "relay" : "p2p" };
   } catch {

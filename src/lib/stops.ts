@@ -14,7 +14,7 @@ export interface Stop {
   active: boolean;
 }
 
-const KEY = "acrob-stops-v15";
+const KEY = "acrob-stops-v16";
 
 // Sabit güzergâh — duraklar + ELOKTROLAND fabrika, aradaki ROTA noktaları OSRM'in
 // yol takibi için ipucu görevi görür.
@@ -27,7 +27,8 @@ const SEED: Array<Omit<Stop, "id" | "order" | "active"> & { active?: boolean }> 
   { name: "ROTA", lat: 39.981263, lng: 32.571191, kind: "waypoint", active: false },
   { name: "ROTA", lat: 39.958, lng: 32.6214, kind: "waypoint" },
   { name: "ROTA", lat: 39.9611, lng: 32.6035, kind: "waypoint" },
-  { name: "1.DURAK", lat: 39.966, lng: 32.6031, kind: "stop" },
+  { name: "1.DURAK", lat: 39.9651, lng: 32.5972, kind: "stop" },
+  { name: "ROTA", lat: 39.968851, lng: 32.600958, kind: "waypoint" },
   { name: "2.DURAK", lat: 39.99583, lng: 32.57631, kind: "stop" },
   { name: "ROTA", lat: 39.9955, lng: 32.5803, kind: "waypoint" },
   { name: "ROTA", lat: 39.996389, lng: 32.585908, kind: "waypoint" },

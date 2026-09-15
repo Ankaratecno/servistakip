@@ -2,19 +2,27 @@ import { useEffect, useRef, useState } from "react";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
-import { loadBuffer, loadVoiceBuffer, playJingle } from "@/lib/jingle";
-import { hourAnnouncementUrl, randomJingleUrl } from "@/lib/voice-assets";
+import { loadBuffer, playJingle } from "@/lib/jingle";
+import { hourAnnouncementUrl, randomJingleUrl, requestAnnouncementUrl } from "@/lib/voice-assets";
 import { callPeer, ensureCall } from "@/lib/radio-calls";
 import { setMediaHandlers, setNowPlaying, setPlaybackState } from "@/lib/media-session";
 import {
   onSongRequest,
-  requestAnnouncementText,
   riderLabel,
   type SongAckPayload,
   type SongRequest,
 } from "@/lib/song-request";
-import { synthAnnouncement } from "@/lib/tts.functions";
-import { canSpeakLocally, speakLocally } from "@/lib/speak-fallback";
+import {
+  clearProgress,
+  deleteSong,
+  listPlayedIds,
+  listSongs,
+  loadProgress,
+  markPlayed,
+  RESUME_REWIND_SEC,
+  saveProgress,
+  type SongProgress,
+} from "@/lib/song-store";
 
 export function RequestDisplay({ title, rider }: { title: string | null; rider: string | null }) {
   const [showRider, setShowRider] = useState(false);
@@ -69,6 +77,8 @@ export default function DriverRadio({
   const [queue, setQueue] = useState<SongRequest[]>([]);
   const [nowRequest, setNowRequest] = useState<SongRequest | null>(null);
   const [autoRequests, setAutoRequests] = useState(true);
+  /** Yarıda kalan isteğin kimliği (listede "kaldığı yerden" etiketi için). */
+  const [resumeId, setResumeId] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -93,6 +103,36 @@ export default function DriverRadio({
   nowRequestRef.current = nowRequest;
   const autoRequestsRef = useRef(true);
   autoRequestsRef.current = autoRequests;
+  /** Yarıda kalan istek parçasının kayıtlı anı (kopma sonrası devam). */
+  const resumeRef = useRef<SongProgress | null>(null);
+  /** Çalınıp bitmiş/atılmış istekler: aynı parça bir daha sıraya girmesin. */
+  const playedRef = useRef<Set<string>>(new Set());
+
+  /**
+   * Bir isteği tamamen tüketir: kalıcı işaret koyar, kaydı ve devam notunu
+   * siler, sırada duruyorsa çıkarır. Böylece parça tekrar dönmez.
+   */
+  const consumeRequest = (req: SongRequest | { id: string; url?: string }) => {
+    playedRef.current.add(req.id);
+    void markPlayed(req.id);
+    void deleteSong(req.id);
+    if (req.url) {
+      try {
+        URL.revokeObjectURL(req.url);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (resumeRef.current?.id === req.id) {
+      resumeRef.current = null;
+      setResumeId(null);
+      void clearProgress();
+    }
+    queueRef.current = queueRef.current.filter((r) => r.id !== req.id);
+    setQueue((prev) => prev.filter((r) => r.id !== req.id));
+  };
+  const consumeRequestRef = useRef(consumeRequest);
+  consumeRequestRef.current = consumeRequest;
 
   // Audio grafiği: <audio> -> gain -> (yayın hedefi + hoparlör)
   const ensureGraph = () => {
@@ -165,6 +205,8 @@ export default function DriverRadio({
     if (list.length === 0) return;
     const safe = ((idx % list.length) + list.length) % list.length;
     ensureGraph();
+    // Çalan bir istek varken normal listeye geçildiyse o istek tüketilmiş sayılır.
+    if (nowRequestRef.current) consumeRequestRef.current(nowRequestRef.current);
     nowRequestRef.current = null;
     setNowRequest(null);
     const el = audioRef.current!;
@@ -310,7 +352,7 @@ export default function DriverRadio({
     sendState(stillPlaying, indexRef.current);
   };
 
-  /** İstek şarkısı anonsu: adı varsa isimle, yoksa durak adıyla. */
+  /** İstek şarkısı anonsu: hazır mp3 ("Elektro Radyo, istek üzerine çalıyor"). */
   const announceRequest = async (req: SongRequest) => {
     ensureGraph();
     const ctx = ctxRef.current!;
@@ -319,26 +361,12 @@ export default function DriverRadio({
     setOnAir(`🎧 İSTEK · ${riderLabel(req)}`);
     duck(true);
     callEveryone();
-    const text = requestAnnouncementText(req);
     try {
-      const buf = await loadVoiceBuffer(
-        ctx,
-        `req:${text}`,
-        async () => (await synthAnnouncement({ data: { text } })).mp3,
-      );
+      const buf = await loadBuffer(ctx, requestAnnouncementUrl());
       await playJingle(ctx, out, { voice: buf, soft: false });
     } catch {
-      // Sunucu TTS yok (statik yayın): jingle çalsın, anonsu hem şoförün
-      // telefonu hem de yolcuların telefonu kendi sesiyle okusun.
+      // Anons sesi indirilemezse en azından jingle çalsın.
       await playJingle(ctx, out, { voice: null, soft: false, bedDuration: 2.6 });
-      connectionsRef.current.forEach((c) => {
-        try {
-          c.send({ type: "voice", text, ts: Date.now() });
-        } catch {
-          /* bağlantı kapanmış olabilir */
-        }
-      });
-      if (canSpeakLocally()) await speakLocally(text);
     }
     duck(false);
     busyRef.current = false;
@@ -346,12 +374,34 @@ export default function DriverRadio({
 
   /** Yolcu isteğini anonsla birlikte yayına alır. */
   const playRequest = async (req: SongRequest) => {
+    // Bu parça daha önce çalınıp bitmişse bir daha yayına alınmaz.
+    if (playedRef.current.has(req.id)) {
+      consumeRequestRef.current(req);
+      return;
+    }
     setQueue((prev) => prev.filter((r) => r.id !== req.id));
     queueRef.current = queueRef.current.filter((r) => r.id !== req.id);
-    await announceRequest(req);
+    // Kopma sonrası devam: aynı parça yarıda kalmışsa anonsu tekrarlamayız,
+    // birkaç saniye geri sarıp kaldığı yerden başlatırız.
+    const resume = resumeRef.current?.id === req.id ? resumeRef.current : null;
+    resumeRef.current = null;
+    setResumeId(null);
+    if (!resume) await announceRequest(req);
     ensureGraph();
     const el = audioRef.current!;
     el.src = req.url;
+    if (resume) {
+      const at = Math.max(0, resume.position - RESUME_REWIND_SEC);
+      const seek = () => {
+        try {
+          el.currentTime = at;
+        } catch {
+          /* ignore */
+        }
+      };
+      if (el.readyState >= 1) seek();
+      else el.addEventListener("loadedmetadata", seek, { once: true });
+    }
     try {
       await el.play();
       nowRequestRef.current = req;
@@ -371,9 +421,39 @@ export default function DriverRadio({
   const playRequestRef = useRef(playRequest);
   playRequestRef.current = playRequest;
 
+  /**
+   * Kopma/yenileme sonrası elle basmadan devam: parçayı hemen başlatmayı dener.
+   * Tarayıcı otomatik çalmayı engellerse ilk dokunuşta kendiliğinden başlar.
+   */
+  const autoResume = async (req: SongRequest) => {
+    const el = audioRef.current;
+    if (busyRef.current || (el && !el.paused)) return;
+    // Otomatik çalma engellenirse aynı andan devam edebilmek için notu saklarız.
+    const snapshot = resumeRef.current;
+    await playRequestRef.current(req);
+    if (audioRef.current && !audioRef.current.paused) return;
+    setErr("Devam için ekrana bir kez dokunun.");
+    const retry = () => {
+      window.removeEventListener("pointerdown", retry);
+      window.removeEventListener("keydown", retry);
+      const cur = audioRef.current;
+      if (busyRef.current || (cur && !cur.paused)) return;
+      if (snapshot?.id === req.id) {
+        resumeRef.current = snapshot;
+        setResumeId(req.id);
+      }
+      void playRequestRef.current(req);
+    };
+    window.addEventListener("pointerdown", retry, { once: true });
+    window.addEventListener("keydown", retry, { once: true });
+  };
+
   /** Şarkı bittiğinde: istek sırası → jingle → sıradaki parça. */
   const afterTrack = async () => {
     if (nowRequestRef.current) {
+      // Sonuna kadar çaldı → kalıcı işaret koy, kaydı ve devam notunu temizle.
+      consumeRequestRef.current(nowRequestRef.current);
+      void clearProgress();
       nowRequestRef.current = null;
       setNowRequest(null);
     } else {
@@ -393,10 +473,85 @@ export default function DriverRadio({
   const afterTrackRef = useRef(afterTrack);
   afterTrackRef.current = afterTrack;
 
+  // Kopma/yenileme sonrası: kalıcı depodaki istekleri sıraya geri koy,
+  // yarıda kalan parçayı listenin başına al.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [songs, progress, playedIds] = await Promise.all([
+        listSongs(),
+        loadProgress(),
+        listPlayedIds(),
+      ]);
+      if (cancelled) return;
+      playedIds.forEach((id) => playedRef.current.add(id));
+      // Daha önce çalınmış parçalar geri yüklenmez, kalıntı kayıtları silinir.
+      const pending = songs.filter((s) => {
+        if (!playedRef.current.has(s.id)) return true;
+        void deleteSong(s.id);
+        return false;
+      });
+      if (pending.length === 0) {
+        if (progress && playedRef.current.has(progress.id)) void clearProgress();
+        return;
+      }
+      const restored: SongRequest[] = pending.map((s) => ({
+        id: s.id,
+        title: s.title,
+        rider: s.rider,
+        stopName: s.stopName,
+        url: URL.createObjectURL(s.blob),
+        peerId: s.peerId,
+        ts: s.ts,
+      }));
+      const half =
+        progress && progress.position > RESUME_REWIND_SEC
+          ? restored.find((r) => r.id === progress.id)
+          : undefined;
+      if (half && progress) {
+        resumeRef.current = progress;
+        setResumeId(half.id);
+      } else {
+        void clearProgress();
+      }
+      const ordered = half ? [half, ...restored.filter((r) => r.id !== half.id)] : restored;
+      setQueue((prev) => {
+        const have = new Set(prev.map((r) => r.id));
+        const merged = [...prev, ...ordered.filter((r) => !have.has(r.id))];
+        queueRef.current = merged;
+        return merged;
+      });
+      // Şoför elle basmasın: yayın boştaysa yarıda kalan parça hemen devam etsin.
+      const target = ordered[0];
+      if (target && autoRequestsRef.current) void autoResume(target);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Çalan istek parçasının anını birkaç saniyede bir not et.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const req = nowRequestRef.current;
+      const el = audioRef.current;
+      if (!req || !el || el.paused || busyRef.current) return;
+      void saveProgress({ id: req.id, position: el.currentTime, ts: Date.now() });
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Yolculardan P2P ile gelen istek şarkıları
   useEffect(
     () =>
       onSongRequest((req) => {
+        // Aynı istek daha önce çalınmışsa (veya sırada duruyorsa) tekrar eklenmez.
+        if (playedRef.current.has(req.id)) {
+          void deleteSong(req.id);
+          return;
+        }
+        if (queueRef.current.some((r) => r.id === req.id) || nowRequestRef.current?.id === req.id)
+          return;
         setQueue((prev) => [...prev, req]);
         queueRef.current = [...queueRef.current, req];
         const conn = Array.from(connectionsRef.current).find((c) => c.peer === req.peerId);
@@ -735,6 +890,7 @@ export default function DriverRadio({
                   <div className="truncate font-semibold">{r.title}</div>
                   <div className="text-[11px] font-mono text-muted-foreground truncate">
                     {riderLabel(r)}
+                    {resumeId === r.id && " · KALDIĞI YERDEN"}
                   </div>
                 </div>
                 <button
@@ -744,10 +900,7 @@ export default function DriverRadio({
                   ▶ Çal
                 </button>
                 <button
-                  onClick={() => {
-                    URL.revokeObjectURL(r.url);
-                    setQueue((prev) => prev.filter((x) => x.id !== r.id));
-                  }}
+                  onClick={() => consumeRequest(r)}
                   className="px-2 py-1 rounded border border-border text-xs hover:bg-muted/50"
                   aria-label="İsteği sil"
                 >

@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import "../src/styles.css";
 import { routeTree } from "../src/routeTree.gen";
+import { registerServiceWorker } from "../src/lib/pwa";
 
 const queryClient = new QueryClient();
 
@@ -23,6 +24,8 @@ declare module "@tanstack/react-router" {
     router: typeof router;
   }
 }
+
+registerServiceWorker();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

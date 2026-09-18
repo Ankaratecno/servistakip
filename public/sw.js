@@ -3,8 +3,9 @@
  * sayfa gezinmeleri "önce ağ, olmazsa önbellek" mantığıyla servis edilir.
  * Statik dosyalar (js/css/font/görsel) önbellekten hızlı döner, arka planda tazelenir.
  */
-const CACHE = "acrob-shell-v1";
-const SHELL = ["/", "/manifest.webmanifest", "/favicon.ico"];
+const CACHE = "acrob-shell-v2";
+const BASE = new URL("./", self.registration.scope).pathname;
+const SHELL = [BASE, `${BASE}manifest.webmanifest`, `${BASE}favicon.ico`];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -45,10 +46,10 @@ self.addEventListener("fetch", (event) => {
       fetch(req)
         .then((res) => {
           const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put("/", copy).catch(() => undefined));
+          caches.open(CACHE).then((c) => c.put(BASE, copy).catch(() => undefined));
           return res;
         })
-        .catch(() => caches.match(req).then((hit) => hit || caches.match("/"))),
+        .catch(() => caches.match(req).then((hit) => hit || caches.match(BASE))),
     );
     return;
   }

@@ -3,7 +3,18 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
 import { loadBuffer, playJingle } from "@/lib/jingle";
-import { hourAnnouncementUrl, randomJingleUrl, requestAnnouncementUrl } from "@/lib/voice-assets";
+import {
+  hourAnnouncementUrl,
+  randomJingleUrl,
+  requestAnnouncementUrl,
+  stopAnnouncement,
+  type StopAnnouncementKey,
+} from "@/lib/voice-assets";
+import {
+  onRadioAnnouncement,
+  queueRadioAnnouncement,
+  type RadioAnnouncement,
+} from "@/lib/radio-announce";
 import { callPeer, ensureCall } from "@/lib/radio-calls";
 import { setMediaHandlers, setNowPlaying, setPlaybackState } from "@/lib/media-session";
 import {
@@ -23,6 +34,17 @@ import {
   saveProgress,
   type SongProgress,
 } from "@/lib/song-store";
+import {
+  clearTracks,
+  deleteTrack,
+  LIBRARY_REWIND_SEC,
+  listTracks,
+  loadLibraryState,
+  reorderTracks,
+  saveLibraryState,
+  saveTracks,
+  type LibraryState,
+} from "@/lib/driver-library";
 
 export function RequestDisplay({ title, rider }: { title: string | null; rider: string | null }) {
   const [showRider, setShowRider] = useState(false);
@@ -44,9 +66,11 @@ export function RequestDisplay({ title, rider }: { title: string | null; rider: 
 }
 
 interface Track {
+  id: string;
   name: string;
   url: string;
 }
+
 
 export default function DriverRadio({
   peerRef,
@@ -107,6 +131,16 @@ export default function DriverRadio({
   const resumeRef = useRef<SongProgress | null>(null);
   /** Çalınıp bitmiş/atılmış istekler: aynı parça bir daha sıraya girmesin. */
   const playedRef = useRef<Set<string>>(new Set());
+  /** Şoför listesinde yarıda kalan parçanın kayıtlı anı (kopma sonrası devam). */
+  const libResumeRef = useRef<LibraryState | null>(null);
+  /**
+   * #5/#6: Ses "çalıyor olmalı" niyeti. Bağlantı kopması, sekme tazelenmesi ya
+   * da tarayıcının otomatik duraklatması durumunda ses öğesi sıfırlanmadan
+   * kaldığı yerden sürdürülür (Bluetooth çıkışı kesilmez).
+   */
+  const wantPlayRef = useRef(false);
+
+
 
   /**
    * Bir isteği tamamen tüketir: kalıcı işaret koyar, kaydı ve devam notunu
@@ -210,20 +244,50 @@ export default function DriverRadio({
     nowRequestRef.current = null;
     setNowRequest(null);
     const el = audioRef.current!;
-    if (el.src !== list[safe]!.url) el.src = list[safe]!.url;
+    const track = list[safe]!;
+    if (el.src !== track.url) el.src = track.url;
+    // Kopma/yenileme sonrası: aynı parça yarıda kalmışsa kaldığı saniyeden başlar.
+    const resume =
+      libResumeRef.current && libResumeRef.current.trackId === track.id
+        ? libResumeRef.current
+        : null;
+    libResumeRef.current = null;
+    if (resume && resume.position > LIBRARY_REWIND_SEC) {
+      const at = Math.max(0, resume.position - LIBRARY_REWIND_SEC);
+      const seek = () => {
+        try {
+          el.currentTime = at;
+        } catch {
+          /* ignore */
+        }
+      };
+      if (el.readyState >= 1) seek();
+      else el.addEventListener("loadedmetadata", seek, { once: true });
+    }
     try {
+      wantPlayRef.current = true;
       await el.play();
       setIndex(safe);
+
       setPlaying(true);
-      setNowPlaying(list[safe]!.name);
+      setNowPlaying(track.name);
       setPlaybackState(true);
       callEveryone();
       sendState(true, safe);
       setErr(null);
+      void saveLibraryState({
+        trackId: track.id,
+        index: safe,
+        position: resume ? Math.max(0, resume.position - LIBRARY_REWIND_SEC) : 0,
+        ts: Date.now(),
+      });
     } catch {
       setErr("Çalma başlatılamadı. Ekrana bir kez dokunup tekrar deneyin.");
     }
   };
+  const playIndexRef = useRef(playIndex);
+  playIndexRef.current = playIndex;
+
 
   const next = () => void playIndex(indexRef.current + 1);
   const prev = () => void playIndex(indexRef.current - 1);
@@ -314,7 +378,24 @@ export default function DriverRadio({
     [],
   );
 
+  /**
+   * #5: Anons/jingle sesleri internetten gelir. Bağlantı yoksa ya da yavaşsa
+   * beklemeden vazgeçilir; müzik yerel dosyadan kesintisiz devam eder.
+   */
+  const loadVoice = async (ctx: AudioContext, url: string) => {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      throw new Error("offline");
+    }
+    return await Promise.race([
+      loadBuffer(ctx, url),
+      new Promise<never>((_, reject) =>
+        window.setTimeout(() => reject(new Error("timeout")), 4000),
+      ),
+    ]);
+  };
+
   const runJingle = async (url: string, soft: boolean, label: string) => {
+
     if (busyRef.current) return;
     ensureGraph();
     const ctx = ctxRef.current!;
@@ -335,7 +416,7 @@ export default function DriverRadio({
       ts: Date.now(),
     });
     try {
-      const buf = await loadBuffer(ctx, url);
+      const buf = await loadVoice(ctx, url);
       await playJingle(ctx, out, { voice: buf, soft });
       setErr(null);
     } catch {
@@ -352,6 +433,99 @@ export default function DriverRadio({
     sendState(stillPlaying, indexRef.current);
   };
 
+  /** Tek bir ses tamponunu yayın hattından çalar (jingle dokusu olmadan). */
+  const playVoiceBuffer = (ctx: AudioContext, out: AudioNode, buf: AudioBuffer) =>
+    new Promise<void>((resolve) => {
+      const g = ctx.createGain();
+      g.gain.value = 1.25;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(g).connect(out);
+      src.onended = () => resolve();
+      src.start();
+      // Bazı tarayıcılarda onended gelmezse emniyet zamanlayıcısı.
+      window.setTimeout(() => resolve(), (buf.duration + 1) * 1000);
+    });
+
+  /**
+   * Durak anonsu: ilk ses jingle dokusuyla girer, arkasından gelen sesler
+   * (ör. esprili kapanış) araya jingle koymadan peş peşe çalar.
+   */
+  const runAnnouncement = async (a: RadioAnnouncement) => {
+    if (busyRef.current) return false;
+    ensureGraph();
+    const ctx = ctxRef.current!;
+    const out = gainRef.current!;
+    busyRef.current = true;
+    setOnAir(a.label);
+    duck(true);
+    callEveryone();
+    broadcast({
+      type: "radio",
+      playing: true,
+      title: tracksRef.current[indexRef.current]?.name ?? null,
+      rider: null,
+      index: indexRef.current,
+      total: tracksRef.current.length,
+      ts: Date.now(),
+    });
+    try {
+      const [first, ...rest] = a.urls;
+      const buf = first ? await loadVoice(ctx, first) : null;
+      await playJingle(ctx, out, { voice: buf, soft: a.soft ?? false, bedDuration: 2.6 });
+      for (const url of rest) {
+        const extra = await loadVoice(ctx, url);
+        await playVoiceBuffer(ctx, out, extra);
+      }
+      setErr(null);
+    } catch {
+      setErr("Durak anonsu sesi çalınamadı.");
+    }
+    duck(false);
+    setOnAir(null);
+    busyRef.current = false;
+    const stillPlaying = !audioRef.current?.paused;
+    setNowPlaying(tracksRef.current[indexRef.current]?.name ?? null);
+    setPlaybackState(stillPlaying);
+    sendState(stillPlaying, indexRef.current);
+    return true;
+  };
+  const runAnnouncementRef = useRef(runAnnouncement);
+  runAnnouncementRef.current = runAnnouncement;
+
+  /** Sırada bekleyen durak anonsları (şarkı aralarında yayına girer). */
+  const announceQueueRef = useRef<RadioAnnouncement[]>([]);
+
+  /** Sıradaki anonsu çalar; sıra boşsa false döner. */
+  const drainAnnouncements = async () => {
+    let played = false;
+    while (announceQueueRef.current.length > 0) {
+      const a = announceQueueRef.current.shift()!;
+      const ok = await runAnnouncementRef.current(a);
+      played = played || ok;
+    }
+    return played;
+  };
+  const drainAnnouncementsRef = useRef(drainAnnouncements);
+  drainAnnouncementsRef.current = drainAnnouncements;
+
+  // Dışarıdan (durak mantığı veya test düğmeleri) gelen anonsları sıraya alır.
+  useEffect(
+    () =>
+      onRadioAnnouncement((a) => {
+        if (announceQueueRef.current.some((q) => q.id === a.id)) return;
+        announceQueueRef.current.push(a);
+        const el = audioRef.current;
+        // Yayın boşsa ya da "hemen" işaretliyse şarkı bitişini bekleme.
+        if (!busyRef.current && (a.immediate || !el || el.paused)) {
+          void drainAnnouncementsRef.current();
+        }
+      }),
+    [],
+  );
+
+
+
   /** İstek şarkısı anonsu: hazır mp3 ("Elektro Radyo, istek üzerine çalıyor"). */
   const announceRequest = async (req: SongRequest) => {
     ensureGraph();
@@ -362,7 +536,7 @@ export default function DriverRadio({
     duck(true);
     callEveryone();
     try {
-      const buf = await loadBuffer(ctx, requestAnnouncementUrl());
+      const buf = await loadVoice(ctx, requestAnnouncementUrl());
       await playJingle(ctx, out, { voice: buf, soft: false });
     } catch {
       // Anons sesi indirilemezse en azından jingle çalsın.
@@ -403,8 +577,10 @@ export default function DriverRadio({
       else el.addEventListener("loadedmetadata", seek, { once: true });
     }
     try {
+      wantPlayRef.current = true;
       await el.play();
       nowRequestRef.current = req;
+
       setNowRequest(req);
       setPlaying(true);
       setNowPlaying(requestTitle(req));
@@ -464,8 +640,10 @@ export default function DriverRadio({
       await playRequest(pending);
       return;
     }
+    // Durak anonsları jingle'dan önceliklidir; ikisi üst üste binmez.
+    const announced = await drainAnnouncementsRef.current();
     const every = Math.max(1, jingleEveryRef.current);
-    if (jingleOnRef.current && playedCountRef.current % every === 0) {
+    if (!announced && jingleOnRef.current && playedCountRef.current % every === 0) {
       await runJingle(randomJingleUrl(), false, "🎙 ELEKTRO RADYO");
     }
     next();
@@ -535,11 +713,69 @@ export default function DriverRadio({
     const id = window.setInterval(() => {
       const req = nowRequestRef.current;
       const el = audioRef.current;
-      if (!req || !el || el.paused || busyRef.current) return;
-      void saveProgress({ id: req.id, position: el.currentTime, ts: Date.now() });
+      if (!el || el.paused || busyRef.current) return;
+      if (req) {
+        void saveProgress({ id: req.id, position: el.currentTime, ts: Date.now() });
+        return;
+      }
+      // Şoför listesi: o an çalan parça ve kaldığı saniye de kalıcı olarak not edilir.
+      const track = tracksRef.current[indexRef.current];
+      if (!track) return;
+      void saveLibraryState({
+        trackId: track.id,
+        index: indexRef.current,
+        position: el.currentTime,
+        ts: Date.now(),
+      });
     }, 3000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Açılışta: cihazda saklı çalma listesini geri yükle, kaldığı yerden devam et.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [stored, state] = await Promise.all([listTracks(), loadLibraryState()]);
+      if (cancelled || stored.length === 0) return;
+      const restored: Track[] = stored.map((s) => ({
+        id: s.id,
+        name: s.name,
+        url: URL.createObjectURL(s.blob),
+      }));
+      tracksRef.current = restored;
+      setTracks(restored);
+      const at = state ? restored.findIndex((t) => t.id === state.trackId) : -1;
+      const startIndex = at >= 0 ? at : 0;
+      indexRef.current = startIndex;
+      setIndex(startIndex);
+      if (state && at >= 0) libResumeRef.current = state;
+      // Yolcu isteği yayına girdiyse ya da bir şey çalıyorsa araya girilmez.
+      const el = audioRef.current;
+      if (nowRequestRef.current || busyRef.current || (el && !el.paused)) return;
+      if (!state || at < 0 || state.position <= 0) return;
+      await playIndexRef.current(startIndex);
+      const cur = audioRef.current;
+      if (cur && !cur.paused) return;
+      // Tarayıcı otomatik çalmayı engellerse ilk dokunuşta devam eder.
+      setErr("Devam için ekrana bir kez dokunun.");
+      const snapshot = state;
+      const retry = () => {
+        window.removeEventListener("pointerdown", retry);
+        window.removeEventListener("keydown", retry);
+        const now = audioRef.current;
+        if (nowRequestRef.current || busyRef.current || (now && !now.paused)) return;
+        libResumeRef.current = snapshot;
+        void playIndexRef.current(startIndex);
+      };
+      window.addEventListener("pointerdown", retry, { once: true });
+      window.addEventListener("keydown", retry, { once: true });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   // Yolculardan P2P ile gelen istek şarkıları
   useEffect(
@@ -600,18 +836,66 @@ export default function DriverRadio({
       return;
     }
     if (el.paused) {
+      wantPlayRef.current = true;
       void el.play();
       setPlaying(true);
       setPlaybackState(true);
       callEveryone();
       sendState(true, indexRef.current);
     } else {
+      wantPlayRef.current = false;
       el.pause();
       setPlaying(false);
       setPlaybackState(false);
       sendState(false, indexRef.current);
     }
   };
+
+  /**
+   * #5/#6 Kesintisiz yerel çalma bekçisi.
+   * Ses öğesi ve AudioContext hiç sıfırlanmaz; sadece askıya alınmışsa
+   * uyandırılır. Bağlantı kopması/yeniden bağlanma ses akışına dokunmaz.
+   */
+  useEffect(() => {
+    const revive = () => {
+      if (!wantPlayRef.current || busyRef.current) return;
+      const ctx = ctxRef.current;
+      if (ctx && ctx.state !== "running") void ctx.resume();
+      const el = audioRef.current;
+      if (el && el.src && el.paused) {
+        const p = el.play();
+        if (p) p.catch(() => undefined);
+      }
+    };
+    const onPause = () => window.setTimeout(revive, 60);
+    const events = ["pause", "stalled", "suspend", "waiting"] as const;
+    let bound: HTMLAudioElement | null = null;
+    const bind = () => {
+      const el = audioRef.current;
+      if (!el || bound === el) return;
+      bound = el;
+      events.forEach((e) => el.addEventListener(e, onPause));
+    };
+    bind();
+    const id = window.setInterval(() => {
+      bind();
+      revive();
+    }, 1000);
+
+    window.addEventListener("online", revive);
+    window.addEventListener("offline", revive);
+    window.addEventListener("pageshow", revive);
+    document.addEventListener("visibilitychange", revive);
+    return () => {
+      window.clearInterval(id);
+      if (bound) events.forEach((e) => bound!.removeEventListener(e, onPause));
+      window.removeEventListener("online", revive);
+      window.removeEventListener("offline", revive);
+      window.removeEventListener("pageshow", revive);
+      document.removeEventListener("visibilitychange", revive);
+    };
+  }, []);
+
 
   // Araç teybi / Bluetooth ekranında parça adı ve tuş kontrolleri
   useEffect(() => {
@@ -664,9 +948,13 @@ export default function DriverRadio({
         /\.(jpg|jpeg|png|gif|heic|webp|mp4|mov|pdf|txt|doc|docx|zip)$/i.test(f.name),
     );
     const accepted = list.filter((f) => !rejected.includes(f));
-    const added = accepted.map((f) => ({
+    const base = tracksRef.current.length;
+    const added = accepted.map((f, i) => ({
+      id: `${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 8)}`,
       name: f.name.replace(/\.[^.]+$/, "") || "Parça",
       url: URL.createObjectURL(f),
+      file: f,
+      order: base + i,
     }));
     if (added.length === 0) {
       setErr(
@@ -675,8 +963,59 @@ export default function DriverRadio({
       return;
     }
     setErr(rejected.length > 0 ? `${rejected.length} dosya ses olmadığı için atlandı.` : null);
-    setTracks((prev) => [...prev, ...added]);
+    // Dosyalar cihazda saklanır: her açılışta yeniden seçmeye gerek kalmaz.
+    void saveTracks(
+      added.map((t) => ({
+        id: t.id,
+        name: t.name,
+        order: t.order,
+        mime: t.file.type || "audio/mpeg",
+        ts: Date.now(),
+        blob: t.file,
+      })),
+    );
+    const plain = added.map((t) => ({ id: t.id, name: t.name, url: t.url }));
+    tracksRef.current = [...tracksRef.current, ...plain];
+    setTracks((prev) => [...prev, ...plain]);
   };
+
+  /** Listeden bir parçayı kalıcı olarak kaldırır. */
+  const removeTrack = (id: string) => {
+    const list = tracksRef.current;
+    const gone = list.find((t) => t.id === id);
+    const rest = list.filter((t) => t.id !== id);
+    tracksRef.current = rest;
+    setTracks(rest);
+    void deleteTrack(id);
+    void reorderTracks(rest.map((t) => t.id));
+    if (gone) {
+      try {
+        URL.revokeObjectURL(gone.url);
+      } catch {
+        /* ignore */
+      }
+    }
+    setIndex((i) => Math.max(0, Math.min(i, rest.length - 1)));
+  };
+
+  /** Kayıtlı tüm dosyaları ve devam notunu siler. */
+  const clearLibrary = () => {
+    audioRef.current?.pause();
+    setPlaying(false);
+    tracksRef.current.forEach((t) => {
+      try {
+        URL.revokeObjectURL(t.url);
+      } catch {
+        /* ignore */
+      }
+    });
+    tracksRef.current = [];
+    setTracks([]);
+    setIndex(0);
+    libResumeRef.current = null;
+    void clearTracks();
+  };
+
 
   const current = tracks[index] ?? null;
 
@@ -859,6 +1198,63 @@ export default function DriverRadio({
             🕐 Saat Anonsu
           </button>
         </div>
+        <div className="hud-label mt-4 mb-2">Hızlı Uyarı</div>
+        <div className="grid grid-cols-1 gap-2">
+          <div className="flex gap-2">
+            <button
+              onClick={() => queueRadioAnnouncement(stopAnnouncement("notToday"))}
+              className="flex-1 py-2 rounded-md border border-destructive/40 text-destructive font-semibold text-xs hover:bg-destructive/10 text-left px-3"
+            >
+              ⚠️ Bugün Yokum
+              <span className="block text-[10px] font-normal text-muted-foreground">
+                "Servisimiz bugün çalışmayacaktır" · şarkı bitince yayına girer
+              </span>
+            </button>
+            <button
+              onClick={() => queueRadioAnnouncement(stopAnnouncement("notToday", true))}
+              className="px-3 rounded-md border border-destructive/40 text-destructive text-xs font-semibold hover:bg-destructive/10"
+              aria-label="Bugün Yokum hemen çal"
+            >
+              Hemen
+            </button>
+          </div>
+        </div>
+        <div className="hud-label mt-4 mb-2">
+          Durak Anonsları — konuma göre otomatik çalar (elle de çalabilirsiniz)
+        </div>
+        <div className="grid grid-cols-1 gap-2">
+          {(
+            [
+              ["bakery2min", "🥐 25 Saat Fırın · 2 dk kala"],
+              ["bakeryNear", "🥐 25 Saat Fırın · yaklaşıyoruz + espri"],
+              ["factory", "🏭 Eloktroland · vardık"],
+            ] as [StopAnnouncementKey, string][]
+          ).map(([key, label]) => (
+            <div key={key} className="flex gap-2">
+              <button
+                onClick={() => queueRadioAnnouncement(stopAnnouncement(key))}
+                className="flex-1 py-2 rounded-md border border-border font-semibold text-xs hover:bg-muted/50 text-left px-3"
+              >
+                {label}
+                <span className="block text-[10px] font-normal text-muted-foreground">
+                  şarkı bitince yayına girer
+                </span>
+              </button>
+              <button
+                onClick={() => queueRadioAnnouncement(stopAnnouncement(key, true))}
+                className="px-3 rounded-md border border-border text-xs font-semibold hover:bg-muted/50"
+                aria-label={`${label} hemen çal`}
+              >
+                Hemen
+              </button>
+            </div>
+          ))}
+        </div>
+        {announceQueueRef.current.length > 0 ? (
+          <div className="text-[11px] text-muted-foreground mt-2">
+            {announceQueueRef.current.length} anons sırada
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-4 rounded-md border border-border p-3">
@@ -913,20 +1309,40 @@ export default function DriverRadio({
       </div>
 
       {tracks.length > 0 && (
-        <div className="mt-4 flex flex-col gap-1 max-h-48 overflow-y-auto pr-1">
-          {tracks.map((t, i) => (
+        <>
+          <div className="mt-4 flex items-center justify-between">
+            <div className="hud-label">Çalma Listesi (cihazda kayıtlı)</div>
             <button
-              key={t.url}
-              onClick={() => void playIndex(i)}
-              className={`text-left px-3 py-2 rounded-md border text-sm truncate ${
-                i === index ? "border-primary text-primary" : "border-border hover:bg-muted/40"
-              }`}
+              onClick={clearLibrary}
+              className="text-[11px] px-2 py-1 rounded border border-border hover:bg-muted/50"
             >
-              {i + 1}. {t.name}
+              Listeyi temizle
             </button>
-          ))}
-        </div>
+          </div>
+          <div className="mt-2 flex flex-col gap-1 max-h-48 overflow-y-auto pr-1">
+            {tracks.map((t, i) => (
+              <div key={t.id} className="flex items-center gap-2">
+                <button
+                  onClick={() => void playIndex(i)}
+                  className={`flex-1 min-w-0 text-left px-3 py-2 rounded-md border text-sm truncate ${
+                    i === index ? "border-primary text-primary" : "border-border hover:bg-muted/40"
+                  }`}
+                >
+                  {i + 1}. {t.name}
+                </button>
+                <button
+                  onClick={() => removeTrack(t.id)}
+                  className="px-2 py-2 rounded border border-border text-xs hover:bg-muted/50"
+                  aria-label={`${t.name} parçasını listeden çıkar`}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
       )}
+
 
       {err && <div className="mt-3 text-xs text-red-400">{err}</div>}
     </div>

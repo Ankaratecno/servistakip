@@ -34,16 +34,19 @@ export const PEER_OPTIONS = {
 
 /** Bulgu 4: kademeli yeniden bağlanma gecikmesi (2s → 30s, hafif rastgele). */
 export function reconnectDelay(attempt: number): number {
-  const base = Math.min(30000, 2000 * Math.pow(1.6, Math.max(0, attempt)));
+  // Kopma sonrası ilk denemeler milisaniye mertebesinde; sonra kademeli
+  // yavaşlayıp kısa bir üst sınıra (8 sn) oturur.
+  const base = Math.min(8000, 500 * Math.pow(1.8, Math.max(0, attempt)));
   return Math.round(base * (0.85 + Math.random() * 0.3));
 }
 
 /**
  * YAPILACAKLAR3 #52: şoför henüz yayında değilken (peer-unavailable) sonsuz
- * yeniden deneme; kısa ve öngörülebilir aralık: 3s → 5s → 10s (üst sınır).
+ * yakalama denemesi; ilk denemeler ~350 ms arayla (milisaniye mertebesi),
+ * ardından 1.5 sn'ye oturur — şoför yayına girer girmez yakalanır.
  */
 export function waitingRetryDelay(attempt: number): number {
-  const steps = [3000, 5000, 10000];
+  const steps = [350, 350, 500, 800, 1500];
   const base = steps[Math.min(attempt, steps.length - 1)]!;
   return Math.round(base * (0.9 + Math.random() * 0.2));
 }

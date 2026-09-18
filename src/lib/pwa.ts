@@ -18,7 +18,7 @@ export function registerServiceWorker() {
   // Vite geliştirme sunucusunda SW modül grafiğini bozabilir → sadece derlemede
   if (import.meta.env.DEV) return;
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {
       /* çevrimdışı kabuk yoksa uygulama yine de çalışır */
     });
   });

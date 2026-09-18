@@ -49,7 +49,6 @@ import {
   reconcileCalls,
 } from "@/lib/radio-calls";
 import {
-  announceText,
   brakeLevel,
   ensureMotionPermission,
   gpsBrakeG,
@@ -69,6 +68,11 @@ import {
   initialTrendState,
   nextStop as pickNextStop,
 } from "@/lib/route-progress";
+import { ingestAutoAnnounce, initialAutoAnnounceState } from "@/lib/auto-stop-announce";
+import {
+  ingestDepartureGreeting,
+  initialDepartureGreetingState,
+} from "@/lib/departure-greeting";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
 import {
@@ -285,11 +289,6 @@ function DriverApp() {
   const startRef = useRef<() => void>(() => undefined);
 
   // --- 10. madde: otomatik durak anonsu + ani fren algılama ---
-  const [announceOn, setAnnounceOn] = useState(
-    () => localStorage.getItem("acrob-stop-announce") !== "0",
-  );
-  const announceOnRef = useRef(announceOn);
-  announceOnRef.current = announceOn;
   const [lastAnnounce, setLastAnnounce] = useState<StopAnnouncePayload | null>(null);
   const [brakes, setBrakes] = useState<BrakeEventPayload[]>([]);
   // Durak tahmini oyunu sıralaması (şoför derler, yolculara dağıtır)
@@ -298,6 +297,13 @@ function DriverApp() {
   const motionReadyRef = useRef(false);
   motionReadyRef.current = motionReady;
   const announceStateRef = useRef(initialAnnounceState());
+  // Konuma göre otomatik radyo anonsu (25 Saat Fırın 2 dk + 30 sn, Eloktroland 30 sn)
+  const autoAnnounceRef = useRef(initialAutoAnnounceState());
+  // 1. ve 9. duraktan kalkışta karşılama anonsu
+  const greetingRef = useRef(initialDepartureGreetingState());
+  const [lastAutoAnnounce, setLastAutoAnnounce] = useState<{ label: string; ts: number } | null>(
+    null,
+  );
   const brakePrevRef = useRef<{ kmh: number; ts: number } | null>(null);
 
   const statsRef = useRef<TripStats>(EMPTY_STATS);
@@ -600,6 +606,16 @@ function DriverApp() {
       .forEach((s) => {
         const dm = distanceM(here, { lat: s.lat, lng: s.lng });
         if (dm <= ARRIVAL_RADIUS_M) applyDay((d) => recordArrival(d, s.id, s.name, now));
+        // 1. ve 9. duraktan kalkışta karşılama anonsu (radyodan yayına girer)
+        const greet = ingestDepartureGreeting(greetingRef.current, {
+          stopId: s.id,
+          stopName: s.name,
+          distanceM: dm,
+          speedKmh: res.speedKmh,
+          accuracyM: pos.coords.accuracy,
+          now,
+        });
+        if (greet) setLastAutoAnnounce({ label: greet, ts: Date.now() });
       });
 
     // 10.1 + D bölümü: anons yalnızca SIRADAKİ durak için, güzergâh (yol)
@@ -625,8 +641,16 @@ function DriverApp() {
         };
         setLastAnnounce(payload);
         broadcastEvent(payload);
-        if (announceOnRef.current) speak(announceText(target.name, etaS));
       }
+      // Konuma göre otomatik radyo anonsu (düğmeye basmaya gerek yok)
+      const autoLabel = ingestAutoAnnounce(autoAnnounceRef.current, {
+        stopId: target.id,
+        stopName: target.name,
+        distanceM: dm,
+        etaS: isFinite(etaS) ? etaS : null,
+        approaching,
+      });
+      if (autoLabel) setLastAutoAnnounce({ label: autoLabel, ts: Date.now() });
     }
 
     if (res.accepted) {
@@ -1708,20 +1732,9 @@ function DriverApp() {
                 </span>
               </div>
 
-              <label className="flex items-center gap-3 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={announceOn}
-                  onChange={(e) => {
-                    setAnnounceOn(e.target.checked);
-                    localStorage.setItem("acrob-stop-announce", e.target.checked ? "1" : "0");
-                  }}
-                  className="w-4 h-4 accent-primary"
-                />
-                <span>
-                  Durağa 350 m kalınca <strong>sesli anons</strong> yap (yolculara da gider)
-                </span>
-              </label>
+              <p className="text-sm text-muted-foreground">
+                Durak ETA sesleri yalnızca ilgili durağı seçen yolcunun telefonunda çalar.
+              </p>
 
               <div className="mt-3 rounded-md border border-border p-3">
                 <div className="hud-label mb-1">Son Anons</div>
@@ -1734,6 +1747,18 @@ function DriverApp() {
                     {lastAnnounce.distanceM} m
                   </div>
                 )}
+              </div>
+
+              <div className="mt-3 rounded-md border border-border p-3">
+                <div className="hud-label mb-1">Son Otomatik Radyo Anonsu</div>
+                <div className="font-bold truncate">
+                  {lastAutoAnnounce ? lastAutoAnnounce.label : "—"}
+                </div>
+                <div className="text-[11px] font-mono text-muted-foreground mt-1">
+                  {lastAutoAnnounce
+                    ? new Date(lastAutoAnnounce.ts).toLocaleTimeString("tr-TR")
+                    : "25 Saat Fırın 2 dk + 30 sn · Eloktroland 30 sn"}
+                </div>
               </div>
 
               <div className="flex items-center justify-between mt-4 mb-2">

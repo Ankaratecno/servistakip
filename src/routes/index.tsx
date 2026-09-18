@@ -27,15 +27,17 @@ import {
   onSpeaking,
   pickRecorderMime,
   speak,
-  squelchOpen,
   type VoiceAlertPayload,
 } from "@/lib/voice-alert";
 import { resumeSharedAudio } from "@/lib/audio-context";
-import { announceText, type BrakeEventPayload, type StopAnnouncePayload } from "@/lib/announce";
+import { type BrakeEventPayload, type StopAnnouncePayload } from "@/lib/announce";
+import {
+  playPassengerStopAnnouncement,
+  preloadPassengerStopAnnouncements,
+} from "@/lib/passenger-stop-audio";
 import StopGuessGame from "@/components/StopGuessGame";
 import type { GuessBoardPayload, GuessBoardRow, GuessScorePayload } from "@/lib/guess-game";
 import {
-  alarmTone,
   ensureNotificationPermission,
   ingestApproach,
   initialApproachState,
@@ -43,7 +45,6 @@ import {
   loadAlertHistory,
   pushAlertHistory,
   clearAlertHistory,
-  needsVisualFallback,
   stageLabel,
   notify,
   setApproachAlertOn,
@@ -263,9 +264,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [brakes, setBrakes] = useState<BrakeEventPayload[]>([]);
   // Durak tahmini oyunu: şoförün derlediği ortak sıralama
   const [guessBoard, setGuessBoard] = useState<GuessBoardRow[]>([]);
-  const [announceOn, setAnnounceOn] = useState(true);
-  const announceOnRef = useRef(true);
-  announceOnRef.current = announceOn;
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -491,10 +489,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         else if (p?.type === "announce") {
           const a = p as StopAnnouncePayload;
           setAnnounce(a);
-          if (announceOnRef.current) {
-            vibrate([200, 100, 200]);
-            speak(announceText(a.stopName));
-          }
         } else if (p?.type === "brake") {
           const b = p as BrakeEventPayload;
           setBrakes((prev) => [b, ...prev].slice(0, 20));
@@ -534,7 +528,19 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       // #52: şoför henüz yayında değilse kısa aralıkla sonsuz yakalama denemesi
       const delay = waitingRef.current ? waitingRetryDelay(attempt) : reconnectDelay(attempt);
       reconnectTimerRef.current = setTimeout(() => {
-        if (peerRef.current && !peerRef.current.destroyed) connect();
+        const p = peerRef.current;
+        if (!p || p.destroyed) return;
+        // Düğmeyle birebir aynı: sinyal hattı düşmüşse önce hattı tazele;
+        // "open" olayı bağlanmayı tetikler. Hat açıksa doğrudan bağlan.
+        if (p.disconnected) {
+          try {
+            p.reconnect();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        connect();
       }, delay);
     };
     scheduleRef.current = scheduleReconnect;
@@ -878,6 +884,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     approachRef.current = initialApproachState();
     alertTrendRef.current = initialTrendState();
     setApproachStage("far");
+    if (selectedStop) preloadPassengerStopAnnouncements(selectedStop.name);
   }, [selectedStopId]);
 
   useEffect(() => {
@@ -901,34 +908,28 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     setApproachStage(ev.stage);
     if (!ev.changed || !alertOn) return;
 
-    const mins = Math.max(1, Math.round((eta?.durationS ?? 0) / 60));
     const title =
       ev.stage === "door"
-        ? "Servis kapıda!"
+        ? "Servis durağa ulaştı!"
         : ev.stage === "arriving"
           ? "Servis geliyor!"
           : "Servis yaklaşıyor";
     const body =
       ev.stage === "door"
-        ? `${selectedStop.name} durağına vardı — hemen çık.`
-        : `${selectedStop.name} durağına yaklaşık ${mins} dakika kaldı.`;
+        ? `Servis ${selectedStop.name} durağına ulaştı.`
+        : ev.stage === "arriving"
+          ? `Servis ${selectedStop.name} durağına yaklaşık 2 dakika sonra ulaşacak.`
+          : `Servis ${selectedStop.name} durağına yaklaşık 5 dakika sonra ulaşacak.`;
 
     if (ev.stage === "near") vibrate([300, 150, 300]);
     else vibrate([600, 200, 600, 200, 600]);
-    if (ev.stage !== "near") {
-      alarmTone();
-      // Telsiz hissi: anonsun başında hışırtı, sonunda kısa cızırtı
-      window.setTimeout(() => squelchOpen(), 260);
-      window.setTimeout(() => {
-        speak(`${title} ${body}`);
-      }, 440);
-      window.setTimeout(() => {
-        speak(`${title} ${body}`);
-      }, 440);
-    }
+    void playPassengerStopAnnouncement(selectedStop.name, ev.stage, (playing) => {
+      duckRef.current = playing;
+      applyRadioVolume();
+    });
     notify(title, body);
-    // #38: iOS'ta bildirim/titreşim yok — tam ekran flaş + ses yedeği
-    if (needsVisualFallback()) {
+    // Kırmızı tam ekran uyarı yalnızca servis seçilen durağa ulaştığında gösterilir.
+    if (ev.stage === "door") {
       setFlash({ title, body });
       window.setTimeout(() => setFlash(null), 8000);
     }
@@ -1367,17 +1368,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       <div className="panel p-5">
         <div className="flex items-center justify-between mb-3">
           <div className="hud-label">Durak Anonsu & Ani Fren</div>
-          <button
-            onClick={() => setAnnounceOn((v) => !v)}
-            className={`text-xs font-bold px-3 py-1.5 rounded-md border transition ${
-              announceOn
-                ? "bg-primary text-primary-foreground border-transparent"
-                : "border-border text-muted-foreground hover:bg-muted/50"
-            }`}
-            aria-pressed={announceOn}
-          >
-            {announceOn ? "SESLİ" : "SESSİZ"}
-          </button>
+          <span className="text-[11px] font-mono text-muted-foreground">BİLGİ</span>
         </div>
         <div className="rounded-md border border-border p-3">
           <div className="hud-label mb-1">Yaklaşan Durak</div>

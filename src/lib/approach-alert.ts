@@ -130,7 +130,7 @@ export interface ApproachInput {
 }
 
 export function stageLabel(stage: ApproachStage): string {
-  if (stage === "door") return "Kapıda";
+  if (stage === "door") return "Ulaştı";
   if (stage === "arriving") return "2 dakika";
   if (stage === "near") return "5 dakika";
   return "Uzakta";

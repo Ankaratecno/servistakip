@@ -71,7 +71,6 @@ interface Track {
   url: string;
 }
 
-
 export default function DriverRadio({
   peerRef,
   connectionsRef,
@@ -139,8 +138,6 @@ export default function DriverRadio({
    * kaldığı yerden sürdürülür (Bluetooth çıkışı kesilmez).
    */
   const wantPlayRef = useRef(false);
-
-
 
   /**
    * Bir isteği tamamen tüketir: kalıcı işaret koyar, kaydı ve devam notunu
@@ -288,7 +285,6 @@ export default function DriverRadio({
   const playIndexRef = useRef(playIndex);
   playIndexRef.current = playIndex;
 
-
   const next = () => void playIndex(indexRef.current + 1);
   const prev = () => void playIndex(indexRef.current - 1);
 
@@ -395,7 +391,6 @@ export default function DriverRadio({
   };
 
   const runJingle = async (url: string, soft: boolean, label: string) => {
-
     if (busyRef.current) return;
     ensureGraph();
     const ctx = ctxRef.current!;
@@ -523,8 +518,6 @@ export default function DriverRadio({
       }),
     [],
   );
-
-
 
   /** İstek şarkısı anonsu: hazır mp3 ("Elektro Radyo, istek üzerine çalıyor"). */
   const announceRequest = async (req: SongRequest) => {
@@ -773,9 +766,7 @@ export default function DriverRadio({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
 
   // Yolculardan P2P ile gelen istek şarkıları
   useEffect(
@@ -896,7 +887,6 @@ export default function DriverRadio({
     };
   }, []);
 
-
   // Araç teybi / Bluetooth ekranında parça adı ve tuş kontrolleri
   useEffect(() => {
     setMediaHandlers({ play: toggle, pause: toggle, next, prev });
@@ -1015,7 +1005,6 @@ export default function DriverRadio({
     libResumeRef.current = null;
     void clearTracks();
   };
-
 
   const current = tracks[index] ?? null;
 
@@ -1342,7 +1331,6 @@ export default function DriverRadio({
           </div>
         </>
       )}
-
 
       {err && <div className="mt-3 text-xs text-red-400">{err}</div>}
     </div>

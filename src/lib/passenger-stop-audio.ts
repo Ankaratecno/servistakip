@@ -64,9 +64,12 @@ export function playPassengerStopAnnouncement(
           audio.onended = finish;
           audio.onerror = finish;
           onPlayback?.(true);
-          void audio.play().then(() => {
-            played = true;
-          }).catch(finish);
+          void audio
+            .play()
+            .then(() => {
+              played = true;
+            })
+            .catch(finish);
         }),
     );
 

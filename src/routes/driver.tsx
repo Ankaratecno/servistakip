@@ -69,10 +69,7 @@ import {
   nextStop as pickNextStop,
 } from "@/lib/route-progress";
 import { ingestAutoAnnounce, initialAutoAnnounceState } from "@/lib/auto-stop-announce";
-import {
-  ingestDepartureGreeting,
-  initialDepartureGreetingState,
-} from "@/lib/departure-greeting";
+import { ingestDepartureGreeting, initialDepartureGreetingState } from "@/lib/departure-greeting";
 import DataSheet from "@/components/DataSheet";
 import WeatherCard from "@/components/WeatherCard";
 import {

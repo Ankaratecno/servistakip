@@ -766,6 +766,7 @@ export default function DriverRadio({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Yolculardan P2P ile gelen istek şarkıları

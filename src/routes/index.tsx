@@ -6,8 +6,8 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Peer, { type DataConnection } from "peerjs";
 import {
   PEER_OPTIONS,
-  reconnectDelay,
-  waitingRetryDelay,
+  passengerRetryDelay,
+  PASSENGER_WATCHDOG_MS,
   PRESENCE_TIMEOUT_MS,
   CONN_OPEN_TIMEOUT_MS,
   watchIceState,
@@ -517,6 +517,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
     const scheduleReconnect = () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (connRef.current?.open) return;
       const attempt = attemptRef.current++;
       setRetryCount(attempt + 1);
       // #19: sekme gizliyken yeniden deneme duraklatılır (batarya);
@@ -525,11 +526,13 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         pendingRetryRef.current = true;
         return;
       }
-      // #52: şoför henüz yayında değilse kısa aralıkla sonsuz yakalama denemesi
-      const delay = waitingRef.current ? waitingRetryDelay(attempt) : reconnectDelay(attempt);
+      // #52: bağlantı hangi sebeple koparsa kopsun milisaniye aralıklı,
+      // "Tekrar dene" düğmesiyle birebir aynı deneme (en fazla 800 ms).
+      const delay = passengerRetryDelay(attempt);
       reconnectTimerRef.current = setTimeout(() => {
         const p = peerRef.current;
         if (!p || p.destroyed) return;
+        if (connRef.current?.open) return;
         // Düğmeyle birebir aynı: sinyal hattı düşmüşse önce hattı tazele;
         // "open" olayı bağlanmayı tetikler. Hat açıksa doğrudan bağlan.
         if (p.disconnected) {
@@ -538,6 +541,8 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           } catch {
             /* ignore */
           }
+          // Hat tazelenmezse sessizce beklemeyelim: kısa süre sonra yeniden dene.
+          scheduleReconnect();
           return;
         }
         connect();
@@ -651,6 +656,18 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       window.removeEventListener("online", retryNow);
     };
   }, [retryNow]);
+
+  // Nöbetçi: bağlantı yokken saniyeden kısa aralıklarla "Tekrar dene"yi kendisi
+  // tetikler; şoför yayına döner dönmez yolcu anında yakalar (radyo gecikmesiz).
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (connRef.current?.open) return;
+      if (Date.now() - lastAttemptAt < PASSENGER_WATCHDOG_MS) return;
+      retryNow();
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [retryNow, lastAttemptAt]);
 
   // YAPILACAKLAR3 #55: "açık ama sessiz" (zombie) şoför kimliği tespiti.
   // 15 sn'dir hiç paket yoksa bağlantı kapatılıp yeniden kurulur.

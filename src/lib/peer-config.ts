@@ -42,14 +42,24 @@ export function reconnectDelay(attempt: number): number {
 
 /**
  * YAPILACAKLAR3 #52: şoför henüz yayında değilken (peer-unavailable) sonsuz
- * yakalama denemesi; ilk denemeler ~350 ms arayla (milisaniye mertebesi),
- * ardından 1.5 sn'ye oturur — şoför yayına girer girmez yakalanır.
+ * yakalama denemesi; ilk denemeler ~250 ms arayla (milisaniye mertebesi),
+ * ardından en fazla 800 ms'ye oturur — şoför yayına girer girmez yakalanır.
  */
 export function waitingRetryDelay(attempt: number): number {
-  const steps = [350, 350, 500, 800, 1500];
+  const steps = [250, 250, 300, 400, 600, 800];
   const base = steps[Math.min(attempt, steps.length - 1)]!;
   return Math.round(base * (0.9 + Math.random() * 0.2));
 }
+
+/**
+ * Yolcu tarafı: bağlantı hangi sebeple koparsa kopsun hızlı ve sabit aralıkla
+ * yeniden dener ("Tekrar dene" düğmesine sürekli basılıyormuş gibi).
+ * Radyo yayınının gecikmemesi için üst sınır 800 ms'dir.
+ */
+export const passengerRetryDelay = waitingRetryDelay;
+
+/** Yolcu tarafı nöbetçi: bu süredir bağlantı yoksa yeni deneme zorlanır. */
+export const PASSENGER_WATCHDOG_MS = 1200;
 
 /**
  * YAPILACAKLAR3 #55: bağlantı açık görünse bile bu süredir hiç paket gelmiyorsa

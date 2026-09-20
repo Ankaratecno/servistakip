@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { Stop } from "@/lib/stops";
+import { LocateFixed, Minus, Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 export interface MapViewProps {
   stops: Stop[];
@@ -137,7 +139,7 @@ export default function MapView({
     const map = L.map(container, {
       center: centerRef.current,
       zoom: 12,
-      zoomControl: true,
+      zoomControl: false,
       attributionControl: true,
       preferCanvas: true,
     });
@@ -172,7 +174,7 @@ export default function MapView({
       const pos = busPositionRef.current;
       if (followRef.current && pos) {
         selfMoveRef.current = true;
-        map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 16), { animate: false });
+        map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 17), { animate: false });
         hasBusFocusRef.current = true;
         hasPositionedRef.current = true;
         window.setTimeout(() => {
@@ -261,7 +263,7 @@ export default function MapView({
       const pos = busPositionRef.current;
       if (!pos || !followRef.current) return;
       selfMoveRef.current = true;
-      map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 16), { animate: false });
+      map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 17), { animate: false });
       hasBusFocusRef.current = true;
       hasPositionedRef.current = true;
       window.setTimeout(() => {
@@ -299,14 +301,14 @@ export default function MapView({
 
     const points = routePath.map(([lat, lng]) => [lat, lng] as L.LatLngTuple);
     L.polyline(points, {
-      color: "#ffffff",
+      color: "#f8fafc",
       weight: 10,
       opacity: 0.55,
       lineCap: "round",
       lineJoin: "round",
     }).addTo(layer);
     L.polyline(points, {
-      color: "#3b82f6",
+      color: "#f5b928",
       weight: 6,
       opacity: 1,
       lineCap: "round",
@@ -353,7 +355,7 @@ export default function MapView({
       if (!hasBusFocusRef.current) {
         // Araç konumu ilk gelince (duraklara göre çerçevelenmiş olsa bile)
         // harita doğrudan araca kilitlenir.
-        map.setView(point, Math.max(map.getZoom(), 16), { animate: false });
+        map.setView(point, Math.max(map.getZoom(), 17), { animate: false });
         hasBusFocusRef.current = true;
         hasPositionedRef.current = true;
       } else {
@@ -371,23 +373,58 @@ export default function MapView({
     followRef.current = true;
     setFollowing(true);
     selfMoveRef.current = true;
-    map.setView([busPosition.lat, busPosition.lng], Math.max(map.getZoom(), 15), { animate: true });
+    map.setView([busPosition.lat, busPosition.lng], Math.max(map.getZoom(), 17), { animate: true });
     window.setTimeout(() => {
       selfMoveRef.current = false;
     }, 400);
   };
 
+  const changeZoom = (delta: number) => {
+    const map = mapRef.current;
+    if (!map) return;
+    stopFollow();
+    map.setZoom(map.getZoom() + delta, { animate: true });
+  };
+
   return (
     <div className={`relative h-full w-full ${className}`}>
       <div ref={containerRef} className="absolute inset-0" />
-      {busPosition && !following && (
-        <button
+      <div className="absolute right-3 top-5 z-[500] flex flex-col overflow-hidden rounded-full border border-border bg-card/95 shadow-lg backdrop-blur">
+        <Button
           type="button"
-          onClick={followBus}
-          className="absolute left-3 top-3 z-[500] rounded-md border border-border bg-card/95 px-3 py-2 text-xs font-semibold text-foreground shadow-md transition hover:bg-card"
+          variant="ghost"
+          size="icon"
+          onClick={() => changeZoom(1)}
+          className="h-11 w-11 rounded-none border-b border-border"
+          aria-label="Yakınlaştır"
+          title="Yakınlaştır"
         >
-          Aracı Takip Et
-        </button>
+          <Plus className="h-5 w-5" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => changeZoom(-1)}
+          className="h-11 w-11 rounded-none"
+          aria-label="Uzaklaştır"
+          title="Uzaklaştır"
+        >
+          <Minus className="h-5 w-5" />
+        </Button>
+      </div>
+      {busPosition && (
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={followBus}
+          className={`absolute bottom-3 left-3 z-[500] h-10 gap-2 rounded-full border border-border bg-card/95 px-3 shadow-lg backdrop-blur ${following ? "text-primary" : "text-foreground"}`}
+          aria-label="Aracı haritada ortala"
+          title="Aracı haritada ortala"
+        >
+          <LocateFixed className="h-4 w-4" />
+          <span className="text-xs font-bold">Ortala</span>
+        </Button>
       )}
     </div>
   );

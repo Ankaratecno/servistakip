@@ -25,9 +25,9 @@ interface Trigger {
 const TRIGGERS: Record<string, Trigger[]> = {
   "25 SAAT FIRIN": [
     { etaS: 120, distanceM: 900, key: "bakery2min", slot: "2dk" },
-    { etaS: 35, distanceM: 250, key: "bakeryNear", slot: "30sn" },
+    { etaS: 30, distanceM: 220, key: "bakeryNear", slot: "30sn" },
   ],
-  ELOKTROLAND: [{ etaS: 35, distanceM: 250, key: "factory", slot: "30sn" }],
+  ELOKTROLAND: [{ etaS: 30, distanceM: 220, key: "factory", slot: "30sn" }],
 };
 
 /** Bu mesafenin ötesine çıkılırsa tetikleyici kilidi sıfırlanır. */

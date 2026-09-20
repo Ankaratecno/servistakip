@@ -65,49 +65,48 @@
 
 :root {
   --radius: 0.75rem;
-  /* Otomotiv karanlık teması - logo ile uyumlu */
-  --background: oklch(0.16 0.01 260);
+  /* Gece haritası: derin lacivert yüzeyler ve sıcak sarı vurgu */
+  --background: oklch(0.16 0.035 245);
   --foreground: oklch(0.98 0.005 240);
-  --card: oklch(0.21 0.012 260);
+  --card: oklch(0.205 0.04 245);
   --card-foreground: oklch(0.98 0.005 240);
-  --popover: oklch(0.21 0.012 260);
+  --popover: oklch(0.205 0.04 245);
   --popover-foreground: oklch(0.98 0.005 240);
-  /* Kırmızı - logodaki kafatasından */
-  --primary: oklch(0.62 0.22 25);
-  --primary-foreground: oklch(0.98 0.005 240);
-  --secondary: oklch(0.28 0.015 260);
+  --primary: oklch(0.82 0.17 78);
+  --primary-foreground: oklch(0.17 0.035 245);
+  --secondary: oklch(0.28 0.04 245);
   --secondary-foreground: oklch(0.98 0.005 240);
-  --muted: oklch(0.25 0.012 260);
-  --muted-foreground: oklch(0.68 0.02 260);
-  --accent: oklch(0.62 0.22 25);
-  --accent-foreground: oklch(0.98 0.005 240);
+  --muted: oklch(0.25 0.035 245);
+  --muted-foreground: oklch(0.72 0.03 245);
+  --accent: oklch(0.82 0.17 78);
+  --accent-foreground: oklch(0.17 0.035 245);
   --destructive: oklch(0.62 0.24 27);
   --destructive-foreground: oklch(0.98 0.005 240);
-  --border: oklch(0.28 0.015 260);
-  --input: oklch(0.25 0.012 260);
-  --ring: oklch(0.62 0.22 25);
-  --chart-1: oklch(0.62 0.22 25);
+  --border: oklch(0.31 0.04 245);
+  --input: oklch(0.25 0.035 245);
+  --ring: oklch(0.82 0.17 78);
+  --chart-1: oklch(0.82 0.17 78);
   --chart-2: oklch(0.7 0.15 200);
   --chart-3: oklch(0.75 0.15 85);
   --chart-4: oklch(0.6 0.2 300);
   --chart-5: oklch(0.65 0.18 145);
-  --sidebar: oklch(0.19 0.012 260);
+  --sidebar: oklch(0.18 0.04 245);
   --sidebar-foreground: oklch(0.98 0.005 240);
-  --sidebar-primary: oklch(0.62 0.22 25);
-  --sidebar-primary-foreground: oklch(0.98 0.005 240);
-  --sidebar-accent: oklch(0.25 0.012 260);
+  --sidebar-primary: oklch(0.82 0.17 78);
+  --sidebar-primary-foreground: oklch(0.17 0.035 245);
+  --sidebar-accent: oklch(0.25 0.035 245);
   --sidebar-accent-foreground: oklch(0.98 0.005 240);
-  --sidebar-border: oklch(0.28 0.015 260);
-  --sidebar-ring: oklch(0.62 0.22 25);
+  --sidebar-border: oklch(0.31 0.04 245);
+  --sidebar-ring: oklch(0.82 0.17 78);
 
   /* Özel tokenler */
   --font-display: "Rajdhani", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --glow-primary: 0 0 20px oklch(0.62 0.22 25 / 0.4), 0 0 40px oklch(0.62 0.22 25 / 0.2);
+  --glow-primary: 0 0 20px oklch(0.82 0.17 78 / 0.35), 0 0 40px oklch(0.82 0.17 78 / 0.14);
   --grid-line: oklch(0.28 0.015 260 / 0.5);
-  --route-line: oklch(0.61 0.22 255);
+  --route-line: oklch(0.82 0.17 78);
   --route-line-casing: oklch(0.98 0.005 240);
-  --route-line-glow: oklch(0.61 0.22 255 / 0.45);
+  --route-line-glow: oklch(0.82 0.17 78 / 0.45);
   /* Canlı yayın (yeşil) */
   --live: oklch(0.78 0.19 148);
   --live-foreground: oklch(0.18 0.02 150);
@@ -157,9 +156,7 @@
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-display);
-    background-image:
-      radial-gradient(circle at 20% 10%, oklch(0.62 0.22 25 / 0.08) 0%, transparent 50%),
-      radial-gradient(circle at 80% 90%, oklch(0.62 0.22 25 / 0.05) 0%, transparent 40%);
+    background-image: none;
     min-height: 100vh;
   }
 
@@ -231,16 +228,24 @@
 
 /* Leaflet karanlık tema uyumu (kullanılmıyor) */
 .leaflet-container {
-  background: oklch(0.16 0.01 260);
+  background: var(--color-background);
   font-family: var(--font-display);
 }
 .leaflet-tile {
-  filter: brightness(0.72) invert(1) contrast(0.92) hue-rotate(190deg) saturate(0.35)
-    brightness(0.82);
+  filter: brightness(0.66) invert(1) contrast(0.9) hue-rotate(180deg) saturate(0.5) brightness(0.76);
+}
+.leaflet-tile-pane {
+  filter: brightness(0.68) invert(1) contrast(0.92) hue-rotate(180deg) saturate(0.48)
+    brightness(0.78);
 }
 .leaflet-control-attribution {
-  background: oklch(0.21 0.012 260 / 0.8) !important;
+  margin: 0 0.5rem 0.5rem 0 !important;
+  border-radius: 9999px !important;
+  padding: 2px 8px !important;
+  background: oklch(0.21 0.012 260 / 0.85) !important;
   color: oklch(0.68 0.02 260) !important;
+  font-size: 9px !important;
+  line-height: 1.2 !important;
 }
 .leaflet-control-attribution a {
   color: var(--color-primary) !important;
@@ -249,6 +254,11 @@
   background: var(--color-card) !important;
   color: var(--color-foreground) !important;
   border-color: var(--color-border) !important;
+}
+
+/* Harita üzerindeki kontroller uygulamanın kendi üst sırasına taşındı. */
+.leaflet-top.leaflet-left {
+  display: none;
 }
 
 .map-stop-marker {
@@ -401,10 +411,10 @@
 }
 @keyframes pulse-ring {
   0% {
-    box-shadow: 0 0 0 0 oklch(0.62 0.22 25 / 0.6);
+    box-shadow: 0 0 0 0 oklch(0.82 0.17 78 / 0.6);
   }
   100% {
-    box-shadow: 0 0 0 20px oklch(0.62 0.22 25 / 0);
+    box-shadow: 0 0 0 20px oklch(0.82 0.17 78 / 0);
   }
 }
 

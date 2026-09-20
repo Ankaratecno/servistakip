@@ -3,6 +3,8 @@ import { readLastKnown, saveLastKnown, type LastKnownState } from "@/lib/pwa";
 
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Bell, BusFront, ChevronRight, Info, Map, Radio } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import Peer, { type DataConnection } from "peerjs";
 import {
   PEER_OPTIONS,
@@ -35,8 +37,7 @@ import {
   playPassengerStopAnnouncement,
   preloadPassengerStopAnnouncements,
 } from "@/lib/passenger-stop-audio";
-import StopGuessGame from "@/components/StopGuessGame";
-import type { GuessBoardPayload, GuessBoardRow, GuessScorePayload } from "@/lib/guess-game";
+import type { GuessBoardPayload, GuessBoardRow } from "@/lib/guess-game";
 import {
   ensureNotificationPermission,
   ingestApproach,
@@ -236,6 +237,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [quality, setQuality] = useState<ConnectionQuality>({ rttMs: null, transport: "unknown" });
 
   const [eta, setEta] = useState<RouteEtaResult | null>(null);
+  const [allStopEtas, setAllStopEtas] = useState<Record<string, RouteEtaResult>>({});
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
   const [radio, setRadio] = useState<RadioStatePayload | null>(null);
   const [day, setDay] = useState<DayLog | null>(null);
@@ -261,7 +263,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [songMsg, setSongMsg] = useState<string | null>(null);
   // --- 10. madde: durak anonsu + ani fren (şoförden canlı gelir) ---
   const [announce, setAnnounce] = useState<StopAnnouncePayload | null>(null);
-  const [brakes, setBrakes] = useState<BrakeEventPayload[]>([]);
   // Durak tahmini oyunu: şoförün derlediği ortak sıralama
   const [guessBoard, setGuessBoard] = useState<GuessBoardRow[]>([]);
   const peerRef = useRef<Peer | null>(null);
@@ -491,7 +492,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           setAnnounce(a);
         } else if (p?.type === "brake") {
           const b = p as BrakeEventPayload;
-          setBrakes((prev) => [b, ...prev].slice(0, 20));
           if (b.level === "sert") vibrate([120, 60, 120]);
         } else if (p?.type === "guess-board") {
           const rows = (p as GuessBoardPayload).rows;
@@ -872,6 +872,30 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
     };
   }, [driver?.lat, driver?.lng, selectedStop?.id, stops]);
 
+  // Harita altındaki durak akışı için tüm durakların kalan sürelerini canlı hesapla.
+  useEffect(() => {
+    if (!driver || stops.length === 0) {
+      setAllStopEtas({});
+      return;
+    }
+    let cancelled = false;
+    const from = { lat: driver.lat, lng: driver.lng };
+    const realStops = stops.filter((stop) => stop.kind === "stop");
+    void Promise.all(
+      realStops.map(async (stop) => [stop.id, await getRouteEta(from, stops, stop.id)] as const),
+    ).then((results) => {
+      if (cancelled) return;
+      const next: Record<string, RouteEtaResult> = {};
+      results.forEach(([id, result]) => {
+        if (result) next[id] = result;
+      });
+      setAllStopEtas(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [driver?.lat, driver?.lng, stops]);
+
   const etaText = eta ? formatEta(eta.durationS) : null;
 
   // #58: harita pinlerinde gösterilecek kalan süre balonları (seçili durak)
@@ -963,11 +987,11 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
   // --- Sekmeli yolcu paneli (kaydırmalı) ---
   const TABS = [
-    { id: "takip", label: "Takip", icon: "🚌" },
-    { id: "radyo", label: "Radyo", icon: "📻" },
-    { id: "uyari", label: "Uyarı", icon: "🔔" },
-    { id: "bilgi", label: "Bilgi", icon: "ℹ️" },
-    { id: "harita", label: "Harita", icon: "🗺️" },
+    { id: "harita", label: "Harita", icon: Map },
+    { id: "takip", label: "Takip", icon: BusFront },
+    { id: "radyo", label: "Radyo", icon: Radio },
+    { id: "uyari", label: "Uyarı", icon: Bell },
+    { id: "bilgi", label: "Bilgi", icon: Info },
   ] as const;
   const [tab, setTab] = useState(0);
   const touchRef = useRef<{ x: number; y: number } | null>(null);
@@ -1384,7 +1408,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
       <div className="panel p-5">
         <div className="flex items-center justify-between mb-3">
-          <div className="hud-label">Durak Anonsu & Ani Fren</div>
+          <div className="hud-label">Yaklaşan Durak Anonsu</div>
           <span className="text-[11px] font-mono text-muted-foreground">BİLGİ</span>
         </div>
         <div className="rounded-md border border-border p-3">
@@ -1396,32 +1420,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
             </div>
           )}
         </div>
-
-        <div className="hud-label mt-4 mb-2">Ani Fren</div>
-        {brakes.length === 0 ? (
-          <div className="text-sm text-muted-foreground">
-            Ani fren algılanmadı. Sert frenler burada anında listelenir.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
-            {brakes.map((b) => (
-              <div
-                key={b.ts}
-                className="flex items-center gap-3 px-3 py-2 rounded-md border border-border text-sm"
-              >
-                <span className="text-lg">{b.level === "sert" ? "🛑" : "⚠️"}</span>
-                <div className="flex-1">
-                  <div className="font-semibold">
-                    {b.level === "sert" ? "Sert fren" : "Ani fren"} · {b.g.toFixed(2)} g
-                  </div>
-                  <div className="text-[11px] font-mono text-muted-foreground">
-                    {new Date(b.ts).toLocaleTimeString("tr-TR")} · {b.speedKmh} km/s
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1442,84 +1440,14 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       : "Şoför yayında değil · güzergâhın başlangıç noktasına göre · Open-Meteo";
 
   const bilgiTab = (
-    <div className="flex flex-col gap-4">
+    <div>
       <WeatherCard position={weatherPos} subtitle={weatherSubtitle} />
-
-      <StopGuessGame
-        stopName={selectedStop?.name ?? null}
-        arrived={approachStage === "door"}
-        live={status === "connected" && !!driver}
-        board={guessBoard}
-        onScore={(payload: GuessScorePayload) => {
-          const conn = connRef.current;
-          if (conn?.open) {
-            try {
-              conn.send(payload);
-            } catch {
-              /* ignore */
-            }
-          }
-        }}
-      />
-
-      <div className="panel p-5">
-        <div className="hud-label mb-3">Araç</div>
-        <div className="text-lg font-bold">
-          {SERVICE_INFO.vehicle} · {SERVICE_INFO.year}
-        </div>
-        <div className="text-xs text-muted-foreground mt-1">{SERVICE_INFO.operator}</div>
-        <div className="text-sm font-mono text-primary mt-2">{SERVICE_INFO.plate}</div>
-      </div>
-
-      <div className="panel p-5">
-        <div className="hud-label mb-3">Bağlantı</div>
-        <StatusBadge status={status} />
-        {/* #65: bağlantı kalitesi — doğrudan/röle ve gecikme */}
-        {status === "connected" && (
-          <div className="mt-2 flex items-center gap-2 text-xs font-mono">
-            <span
-              className={`h-2 w-2 rounded-full ${
-                quality.rttMs == null
-                  ? "bg-muted-foreground"
-                  : quality.rttMs < 150
-                    ? "bg-live"
-                    : quality.rttMs < 400
-                      ? "bg-primary"
-                      : "bg-destructive"
-              }`}
-            />
-            <span className="text-muted-foreground">
-              {quality.transport === "relay"
-                ? "RÖLE (TURN)"
-                : quality.transport === "p2p"
-                  ? "DOĞRUDAN P2P"
-                  : "BAĞLANTI YOLU ÖLÇÜLÜYOR"}
-              {quality.rttMs != null ? ` · ${quality.rttMs} ms` : ""}
-              {` · veri ${dataAgeSec}s`}
-            </span>
-          </div>
-        )}
-        <button
-          onClick={onBack}
-          className="mt-3 w-full py-2.5 rounded-md border border-border text-sm font-semibold hover:bg-muted/50 transition"
-        >
-          ← Plaka Ekranına Dön
-        </button>
-        <div className="mt-4 pt-3 border-t border-border flex justify-between text-xs">
-          <Link to="/driver" className="text-muted-foreground hover:text-primary">
-            → Şoför Girişi
-          </Link>
-          <Link to="/admin" className="text-muted-foreground hover:text-primary">
-            → Durak Yönetimi
-          </Link>
-        </div>
-      </div>
     </div>
   );
 
   const haritaTab = (
-    <div className="space-y-3">
-      <div className="panel overflow-hidden h-[70vh] min-h-[420px]">
+    <div className="relative -mx-4 -mt-4 h-[calc(100dvh-3.75rem)] min-h-[520px] overflow-hidden bg-background">
+      <div className="absolute inset-x-0 top-0 bottom-[9.5rem] overflow-hidden">
         <ClientOnly fallback={null}>
           <Suspense fallback={null}>
             <MapView
@@ -1531,44 +1459,84 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
               busSpeedKmh={driver?.speedKmh ?? null}
               busIconUrl={busPassengerIcon}
               stopEta={mapStopEta}
-              active={tab === 4}
+              active={tab === 0}
               className="h-full"
             />
           </Suspense>
         </ClientOnly>
       </div>
-      <div className="flex items-center justify-center gap-2 text-xs font-mono text-muted-foreground">
-        <span
-          className={`h-2 w-2 rounded-full ${status === "connected" && busPos ? "bg-live" : "bg-primary"}`}
-        />
-        {status === "connected" && busPos
-          ? `CANLI KONUM · ${busPos.lat.toFixed(5)}, ${busPos.lng.toFixed(5)}`
-          : status === "connected"
-            ? "BAĞLANDI · KONUM BEKLENİYOR"
-            : status === "waiting"
-              ? "ŞOFÖR YAYINI BEKLENİYOR"
-              : "BAĞLANIYOR"}
-        {status === "connected" && quality.transport !== "unknown" && (
-          <span className="text-muted-foreground/70">
-            · {quality.transport === "relay" ? "RÖLE" : "P2P"}
-            {quality.rttMs != null ? ` ${quality.rttMs}ms` : ""}
-          </span>
-        )}
+      <div className="absolute left-3 top-5 z-[500] flex h-12 w-12 flex-col items-center justify-center rounded-full border border-primary/50 bg-card/95 text-primary shadow-lg backdrop-blur">
+        <span className="text-base font-black leading-none">
+          {dataStale ? "—" : Math.round(driver?.speedKmh ?? 0)}
+        </span>
+        <span className="text-[8px] font-bold uppercase leading-none">km/s</span>
       </div>
-      {!busPos && (
-        <p className="text-xs text-muted-foreground text-center">
-          Şoför yayına başladığında araç haritada canlı görünecek.
-        </p>
-      )}
+      <div className="absolute left-1/2 top-5 z-[500] flex h-12 -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-card/95 px-4 shadow-lg backdrop-blur">
+        <BusFront className="h-5 w-5 text-primary" aria-hidden="true" />
+        <span className="whitespace-nowrap text-base font-bold">{SERVICE_INFO.plate}</span>
+        <ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+      </div>
+      <div className="absolute inset-x-0 bottom-0 z-[510] h-[9.5rem] bg-card/98 pt-3 shadow-[0_-12px_30px_oklch(0_0_0/0.25)]">
+        <div className="mb-2 flex items-center justify-between px-4 text-[10px] font-mono text-muted-foreground">
+          <span>
+            {stops
+              .filter((stop) => stop.kind === "stop")
+              .findIndex((stop) => stop.id === selectedStopId) + 1 || 1}{" "}
+            / {stops.filter((stop) => stop.kind === "stop").length}
+          </span>
+          <span className={status === "connected" && busPos ? "text-live" : ""}>
+            {status === "connected" && busPos ? "CANLI" : "KONUM BEKLENİYOR"}
+          </span>
+        </div>
+        <div
+          className="flex touch-pan-x snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain px-4 pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          onTouchStart={(event) => event.stopPropagation()}
+          onTouchEnd={(event) => event.stopPropagation()}
+        >
+          {stops
+            .filter((stop) => stop.kind === "stop")
+            .map((stop, index) => {
+              const stopEtaResult = allStopEtas[stop.id];
+              const stopEtaText = stopEtaResult ? formatEta(stopEtaResult.durationS) : null;
+              const selected = stop.id === selectedStopId;
+              return (
+                <Button
+                  key={stop.id}
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setSelectedStopId(stop.id)}
+                  className={`h-[5.5rem] w-[78vw] max-w-[19rem] shrink-0 snap-center items-stretch justify-start rounded-lg px-4 py-3 text-left shadow-sm transition ${
+                    selected
+                      ? "border border-primary bg-card/90 ring-1 ring-primary/40 hover:bg-card/90 hover:text-foreground active:bg-card/90"
+                      : "border border-border bg-secondary/70 hover:bg-card/60 hover:text-foreground active:bg-card/70"
+                  }`}
+                >
+                  <span
+                    className={`mt-1 h-12 w-1 shrink-0 rounded-full ${selected ? "bg-primary" : "bg-muted"}`}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-bold">
+                      {index + 1}. {stop.name}
+                    </span>
+                    <span className="mt-1 block text-lg font-black text-primary">
+                      {stopEtaText ? `${stopEtaText.minutes} dk ${stopEtaText.secs} sn` : "—"}
+                    </span>
+                    <span className="block text-[10px] text-muted-foreground">
+                      Tahmini varış süresi
+                    </span>
+                  </span>
+                </Button>
+              );
+            })}
+        </div>
+      </div>
     </div>
   );
 
-  const panes = [takipTab, radyoTab, uyariTab, bilgiTab, haritaTab];
+  const panes = [haritaTab, takipTab, radyoTab, uyariTab, bilgiTab];
 
   return (
     <div className="min-h-screen flex flex-col">
-      <Header right={<DataSheet day={day} onReset={() => setDay(null)} />} />
-
       {/* Sekme değiştirince radyo susmasın: ses öğesi her zaman DOM'da kalır. */}
       <audio ref={radioAudioRef} autoPlay playsInline className="hidden" />
 
@@ -1588,7 +1556,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
 
       {/* YAPILACAKLAR3 #50: tek dokunuşla ilk kurulum */}
       {!onboarded && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-background/95 backdrop-blur px-4 py-6">
+        <div className="fixed inset-0 z-[1000] flex items-end sm:items-center justify-center bg-background/95 backdrop-blur px-4 py-6">
           <div className="panel w-full max-w-md p-6">
             <div className="hud-label">Hoş geldin</div>
             <h2 className="text-2xl font-black mt-1">Servisi takip etmeye başla</h2>
@@ -1649,7 +1617,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >
-        <div className="flex items-center justify-between mb-3">
+        <div className={`items-center justify-between mb-3 ${tab === 0 ? "hidden" : "flex"}`}>
           <div className="hud-label">{TABS[tab]!.label}</div>
           <div className="flex items-center gap-1.5">
             {TABS.map((t, i) => (
@@ -1679,22 +1647,20 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         <div className="max-w-3xl mx-auto grid grid-cols-5">
           {TABS.map((t, i) => {
             const active = i === tab;
+            const Icon = t.icon;
             return (
               <button
                 key={t.id}
                 onClick={() => setTab(i)}
                 aria-current={active ? "page" : undefined}
-                className={`relative flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold uppercase tracking-wider transition ${
-                  active ? "text-primary" : "text-muted-foreground hover:text-foreground"
-                }`}
+                className="relative flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground transition hover:text-foreground"
               >
-                <span className="text-lg leading-none">{t.icon}</span>
-                <span className="truncate">{t.label}</span>
+                <Icon className="h-5 w-5" strokeWidth={1.8} aria-hidden="true" />
+                <span className={`truncate ${active ? "text-primary" : "text-foreground/80"}`}>
+                  {t.label}
+                </span>
                 {t.id === "radyo" && radioLive && (
                   <span className="absolute top-1.5 right-1/2 translate-x-4 live-dot" />
-                )}
-                {active && (
-                  <span className="absolute top-0 inset-x-3 h-0.5 rounded-full bg-primary" />
                 )}
               </button>
             );

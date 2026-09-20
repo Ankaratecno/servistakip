@@ -3,7 +3,7 @@
 // yaklaşınca hazır anons kaydı yayına girer (hem şoförde hem yolcularda duyulur).
 //
 // Kurallar:
-//  - 25 SAAT FIRIN  → ~2 dakika kala ve ~30 saniye kala (30 sn anonsu + espri)
+//  - 25 SAAT FIRIN  → ~2 dakika kala ve ~30 saniye kala
 //  - ELOKTROLAND    → ~30 saniye kala
 // Her anons gün içinde durak başına yalnızca bir kez çalar; servis duraktan
 // uzaklaşırsa (yeni tur) kilit kendiliğinden sıfırlanır.

@@ -27,11 +27,17 @@ import { formatEta, getRoute, getRouteEta, type RouteEtaResult } from "@/lib/rou
 import {
   beep,
   playBase64Audio,
-  speak,
   squelchClose,
   squelchOpen,
   type VoiceAlertPayload,
 } from "@/lib/voice-alert";
+
+/** "Bugün yokum" uyarısı: ses üretmeden sadece kısa bip + kapanış cızırtısı. */
+function playAbsentAlert() {
+  beep();
+  window.setTimeout(() => beep(), 320);
+  window.setTimeout(() => squelchClose(), 700);
+}
 import type { RadioStatePayload } from "@/lib/radio";
 import type { RadioAckPayload, RadioRequestPayload } from "@/lib/radio";
 import { ingestSongPacket } from "@/lib/song-request";
@@ -51,14 +57,9 @@ import {
   reconcileCalls,
 } from "@/lib/radio-calls";
 import {
-  brakeLevel,
-  ensureMotionPermission,
-  gpsBrakeG,
   ingestStopDistance,
   initialAnnounceState,
   resetAnnounce,
-  startBrakeWatch,
-  type BrakeEventPayload,
   type StopAnnouncePayload,
 } from "@/lib/announce";
 import {
@@ -73,6 +74,7 @@ import {
 import { ingestAutoAnnounce, initialAutoAnnounceState } from "@/lib/auto-stop-announce";
 import { ingestDepartureGreeting, initialDepartureGreetingState } from "@/lib/departure-greeting";
 import DataSheet from "@/components/DataSheet";
+import DriverInfoBadge from "@/components/DriverInfoBadge";
 import WeatherCard from "@/components/WeatherCard";
 import {
   ARRIVAL_RADIUS_M,
@@ -299,23 +301,14 @@ function DriverApp() {
   const idRetryRef = useRef(0);
   const startRef = useRef<() => void>(() => undefined);
 
-  // --- 10. madde: otomatik durak anonsu + ani fren algılama ---
-  const [lastAnnounce, setLastAnnounce] = useState<StopAnnouncePayload | null>(null);
-  const [brakes, setBrakes] = useState<BrakeEventPayload[]>([]);
+  // --- Otomatik durak anonsları ---
   // Durak tahmini oyunu sıralaması (şoför derler, yolculara dağıtır)
   const guessBoardRef = useRef<GuessBoardRow[]>([]);
-  const [motionReady, setMotionReady] = useState(false);
-  const motionReadyRef = useRef(false);
-  motionReadyRef.current = motionReady;
   const announceStateRef = useRef(initialAnnounceState());
   // Konuma göre otomatik radyo anonsu (25 Saat Fırın 2 dk + 30 sn, Eloktroland 30 sn)
   const autoAnnounceRef = useRef(initialAutoAnnounceState());
   // 1. ve 9. duraktan kalkışta karşılama anonsu
   const greetingRef = useRef(initialDepartureGreetingState());
-  const [lastAutoAnnounce, setLastAutoAnnounce] = useState<{ label: string; ts: number } | null>(
-    null,
-  );
-  const brakePrevRef = useRef<{ kmh: number; ts: number } | null>(null);
 
   const statsRef = useRef<TripStats>(EMPTY_STATS);
   const filterRef = useRef<FilterState>(initialFilterState());
@@ -358,6 +351,8 @@ function DriverApp() {
   const restartTimerRef = useRef<number | null>(null);
   const restartAttemptRef = useRef(0);
   const [recovering, setRecovering] = useState(false);
+  // Harita sekmesindeki hız rozeti: üstüne basınca geçici olarak büyür
+  const [speedBig, setSpeedBig] = useState(false);
 
   // Rota noktaları dahil tüm liste (şoför her noktayı başlangıç seçebilir / atlayabilir)
   const realStops = allStops;
@@ -495,8 +490,8 @@ function DriverApp() {
     });
   };
 
-  // Durak anonsu / ani fren paketlerini tüm yolculara gönder
-  const broadcastEvent = (payload: StopAnnouncePayload | BrakeEventPayload) => {
+  // Durak anonsu paketini tüm yolculara gönder
+  const broadcastEvent = (payload: StopAnnouncePayload) => {
     connectionsRef.current.forEach((c) => {
       try {
         if (c.open) c.send(payload);
@@ -504,19 +499,6 @@ function DriverApp() {
         /* ignore */
       }
     });
-  };
-
-  const registerBrake = (g: number, source: "sensör" | "gps") => {
-    const payload: BrakeEventPayload = {
-      type: "brake",
-      g,
-      level: brakeLevel(g),
-      speedKmh: Math.round(filterRef.current.smoothedKmh),
-      source,
-      ts: Date.now(),
-    };
-    setBrakes((prev) => [payload, ...prev].slice(0, 20));
-    broadcastEvent(payload);
   };
 
   // --- 7. madde: günlük hareket kaydı (IndexedDB) ---
@@ -628,13 +610,6 @@ function DriverApp() {
     });
     setLiveSpeed(res.speedKmh);
     setLiveHeading(pos.coords.heading);
-    // 10.2 GPS yedeği: ivmeölçer yoksa hız düşüşünden ani fren çıkar
-    const prevSpeed = brakePrevRef.current;
-    if (!motionReadyRef.current && prevSpeed) {
-      const gB = gpsBrakeG(prevSpeed.kmh, res.speedKmh, (now - prevSpeed.ts) / 1000);
-      if (gB > 0) registerBrake(gB, "gps");
-    }
-    brakePrevRef.current = { kmh: res.speedKmh, ts: now };
     // Kontak API'si olmayan cihazlarda hareket/duruş yedeği
     if (res.speedKmh > 5) {
       lastIdleTsRef.current = now;
@@ -658,7 +633,7 @@ function DriverApp() {
           accuracyM: pos.coords.accuracy,
           now,
         });
-        if (greet) setLastAutoAnnounce({ label: greet, ts: Date.now() });
+        void greet;
       });
 
     // 10.1 + D bölümü: anons yalnızca SIRADAKİ durak için, güzergâh (yol)
@@ -682,7 +657,6 @@ function DriverApp() {
           etaS: Math.round(etaS),
           ts: Date.now(),
         };
-        setLastAnnounce(payload);
         broadcastEvent(payload);
       }
       // Konuma göre otomatik radyo anonsu (düğmeye basmaya gerek yok)
@@ -693,7 +667,7 @@ function DriverApp() {
         etaS: isFinite(etaS) ? etaS : null,
         approaching,
       });
-      if (autoLabel) setLastAutoAnnounce({ label: autoLabel, ts: Date.now() });
+      void autoLabel;
     }
 
     if (res.accepted) {
@@ -1003,10 +977,10 @@ function DriverApp() {
         window.setTimeout(() => {
           if (p.kind === "voice" && p.audio) {
             void playBase64Audio(p.audio, p.mime ?? "audio/webm");
+            window.setTimeout(() => squelchClose(), 900);
           } else {
-            speak(p.text ?? `${p.stopName ?? "Bir"} durağındaki yolcu bugün gelmiyor.`);
+            playAbsentAlert();
           }
-          window.setTimeout(() => squelchClose(), 900);
         }, 350);
       });
 
@@ -1265,24 +1239,6 @@ function DriverApp() {
   useEffect(() => () => stopInternal(), []);
   startRef.current = start;
 
-  // 10.2 Ani fren algılama: yayın açıkken ivmeölçeri dinle
-  useEffect(() => {
-    if (!running) return;
-    let stop: (() => void) | null = null;
-    let cancelled = false;
-    void ensureMotionPermission().then((ok) => {
-      if (cancelled) return;
-      setMotionReady(ok);
-      if (!ok) return;
-      stop = startBrakeWatch((g) => registerBrake(g, "sensör"));
-    });
-    return () => {
-      cancelled = true;
-      stop?.();
-      setMotionReady(false);
-    };
-  }, [running]);
-
   // Bulgu 1 & 2: yayın açıkken ekranın kapanmasını engelle (GPS + yayın kesilmesin),
   // sekme arka plandan dönünce kilidi yeniden al.
   useEffect(() => {
@@ -1433,6 +1389,12 @@ function DriverApp() {
   }, [mapStopEtas, selectedMapStopId]);
 
   const onTouchStart = (event: React.TouchEvent<HTMLElement>) => {
+    // Harita sekmesinde kaydırma ile sekme değiştirme kapalı
+    if (tab === 0) {
+      touchStartRef.current = null;
+      swipeBlockedRef.current = true;
+      return;
+    }
     const target = event.target as HTMLElement;
     swipeBlockedRef.current = Boolean(
       target.closest("button, input, select, textarea, label, [role='slider'], .maplibregl-map"),
@@ -1730,82 +1692,6 @@ function DriverApp() {
               </div>
             </div>
 
-            {/* 10. madde: durak anonsu + ani fren */}
-            <div className={tab === 4 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
-              <div className="flex items-center justify-between mb-3">
-                <div className="hud-label">Durak Anonsu & Ani Fren</div>
-                <span className="text-[11px] font-mono text-muted-foreground">
-                  {motionReady ? "İVMEÖLÇER AKTİF" : "GPS YEDEĞİ"}
-                </span>
-              </div>
-
-              <p className="text-sm text-muted-foreground">
-                Durak ETA sesleri yalnızca ilgili durağı seçen yolcunun telefonunda çalar.
-              </p>
-
-              <div className="mt-3 rounded-md border border-border p-3">
-                <div className="hud-label mb-1">Son Anons</div>
-                <div className="font-bold truncate">
-                  {lastAnnounce ? lastAnnounce.stopName : "—"}
-                </div>
-                {lastAnnounce && (
-                  <div className="text-[11px] font-mono text-muted-foreground mt-1">
-                    {new Date(lastAnnounce.ts).toLocaleTimeString("tr-TR")} ·{" "}
-                    {lastAnnounce.distanceM} m
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-3 rounded-md border border-border p-3">
-                <div className="hud-label mb-1">Son Otomatik Radyo Anonsu</div>
-                <div className="font-bold truncate">
-                  {lastAutoAnnounce ? lastAutoAnnounce.label : "—"}
-                </div>
-                <div className="text-[11px] font-mono text-muted-foreground mt-1">
-                  {lastAutoAnnounce
-                    ? new Date(lastAutoAnnounce.ts).toLocaleTimeString("tr-TR")
-                    : "25 Saat Fırın 2 dk + 30 sn · Eloktroland 30 sn"}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between mt-4 mb-2">
-                <div className="hud-label">Ani Fren Kayıtları</div>
-                {brakes.length > 0 && (
-                  <button
-                    onClick={() => setBrakes([])}
-                    className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted/50"
-                  >
-                    Temizle
-                  </button>
-                )}
-              </div>
-              {brakes.length === 0 ? (
-                <div className="text-sm text-muted-foreground">
-                  Ani fren algılanmadı. Sert frenler burada ve yolcuların ekranında listelenir.
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
-                  {brakes.map((b) => (
-                    <div
-                      key={b.ts}
-                      className="flex items-center gap-3 px-3 py-2 rounded-md border border-border text-sm"
-                    >
-                      <span className="text-lg">{b.level === "sert" ? "🛑" : "⚠️"}</span>
-                      <div className="flex-1">
-                        <div className="font-semibold">
-                          {b.level === "sert" ? "Sert fren" : "Ani fren"} · {b.g.toFixed(2)} g
-                        </div>
-                        <div className="text-[11px] font-mono text-muted-foreground">
-                          {new Date(b.ts).toLocaleTimeString("tr-TR")} · {b.speedKmh} km/s ·{" "}
-                          {b.source}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
             {/* Radyo sekme değişiminde kaldırılmaz; yayın ve istek sırası kesilmez. */}
             <div className={tab === 2 ? "block animate-in fade-in duration-200" : "hidden"}>
               <Suspense fallback={null}>
@@ -1902,15 +1788,21 @@ function DriverApp() {
                   />
                 </Suspense>
               </div>
-              <div className="pointer-events-none absolute left-1/2 top-5 z-[500] -translate-x-1/2">
-                <div className="flex h-12 items-center gap-2 rounded-full border border-border bg-card/95 px-4 shadow-lg backdrop-blur">
-                  <BusFront className="h-5 w-5 text-primary" aria-hidden="true" />
-                  <span className="whitespace-nowrap text-base font-bold">{SERVICE_INFO.plate}</span>
-                </div>
-              </div>
-              <div className="pointer-events-none absolute left-3 top-5 z-[500] flex h-12 w-12 flex-col items-center justify-center rounded-full border border-primary/50 bg-card/95 text-primary shadow-lg backdrop-blur">
-                <span className="text-base font-black leading-none">{Math.round(speedKmh)}</span>
-                <span className="text-[8px] font-bold uppercase leading-none">km/s</span>
+              <DriverInfoBadge />
+              <div
+                onClick={() => setSpeedBig((v) => !v)}
+                className={`absolute left-3 top-5 z-[500] flex flex-col items-center justify-center rounded-full border border-primary/50 bg-card/95 text-primary shadow-lg backdrop-blur cursor-pointer transition-all duration-200 ${speedBig ? "h-16 w-16" : "h-12 w-12"}`}
+              >
+                <span
+                  className={`font-black leading-none transition-all duration-200 ${speedBig ? "text-2xl" : "text-base"}`}
+                >
+                  {Math.round(speedKmh)}
+                </span>
+                <span
+                  className={`font-bold uppercase leading-none transition-all duration-200 ${speedBig ? "text-xs" : "text-[8px]"}`}
+                >
+                  km/s
+                </span>
               </div>
               <div className="absolute inset-x-0 bottom-0 z-[510] h-[9.5rem] bg-card/98 pt-3 shadow-[0_-12px_30px_oklch(0_0_0/0.25)]">
                 <div className="mb-2 flex items-center justify-between px-4 text-[10px] font-mono text-muted-foreground">
@@ -2122,4 +2014,3 @@ function StopPlanner({
     </div>
   );
 }
-

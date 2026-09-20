@@ -64,11 +64,6 @@ export function bakery30SecUrl(): string {
   return fileUrl("durak-25saat-30sn");
 }
 
-/** 25 Saat Fırın ana anonsunun hemen ardından çalan esprili kapanış. */
-export function bakeryJokeUrl(): string {
-  return fileUrl("durak-25saat-espri");
-}
-
 /** Eloktroland (fabrika) varış anonsu. */
 export function factoryArrivalUrl(): string {
   return fileUrl("durak-eloktroland-30sn");
@@ -82,7 +77,7 @@ export function notTodayUrl(): string {
 /** Hazır durak anons paketleri — kuyruğa olduğu gibi bırakılabilir. */
 export const STOP_ANNOUNCEMENTS = {
   bakery2min: { label: "🥐 25 SAAT FIRIN · 2 DK", urls: [bakery2MinUrl] },
-  bakeryNear: { label: "🥐 25 SAAT FIRIN", urls: [bakery30SecUrl, bakeryJokeUrl] },
+  bakeryNear: { label: "🥐 25 SAAT FIRIN", urls: [bakery30SecUrl] },
   factory: { label: "🏭 ELOKTROLAND", urls: [factoryArrivalUrl] },
   notToday: { label: "⚠️ BUGÜN YOKUM", urls: [notTodayUrl] },
 } as const;

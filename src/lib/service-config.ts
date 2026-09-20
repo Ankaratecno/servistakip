@@ -2,6 +2,10 @@
 export const SERVICE_INFO = {
   plate: "06 FNJ 165",
   driverName: "TANER BAYSAL",
+  driverAge: 32,
+  licenseClasses: "B C D F",
+  bloodType: "AB RH +",
+  srcClasses: "1, 3, 5 + SINIF 1",
   vehicle: "Volkswagen Crafter",
   year: 2016,
   operator: "Acrob Elektroland",

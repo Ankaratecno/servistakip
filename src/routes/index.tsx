@@ -3,7 +3,7 @@ import { readLastKnown, saveLastKnown, type LastKnownState } from "@/lib/pwa";
 
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, BusFront, ChevronRight, Info, Map, Radio } from "lucide-react";
+import { Bell, BusFront, Info, Map, Radio } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Peer, { type DataConnection } from "peerjs";
 import {
@@ -32,7 +32,7 @@ import {
   type VoiceAlertPayload,
 } from "@/lib/voice-alert";
 import { resumeSharedAudio } from "@/lib/audio-context";
-import { type BrakeEventPayload, type StopAnnouncePayload } from "@/lib/announce";
+import { type StopAnnouncePayload } from "@/lib/announce";
 import {
   playPassengerStopAnnouncement,
   preloadPassengerStopAnnouncements,
@@ -66,6 +66,7 @@ import type { PresencePayload } from "@/lib/riders";
 import { setNowPlaying, setPlaybackState } from "@/lib/media-session";
 import type { MediaConnection } from "peerjs";
 import DataSheet from "@/components/DataSheet";
+import DriverInfoBadge from "@/components/DriverInfoBadge";
 import { MAX_SONG_BYTES, sendSong, type SongAckPayload } from "@/lib/song-request";
 import WeatherCard from "@/components/WeatherCard";
 import { RequestDisplay } from "@/components/DriverRadio";
@@ -210,6 +211,8 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [onboarded, setOnboarded] = useState(true);
   // YAPILACAKLAR3 #51: sürüş modu — güneş altında okunabilir dev tipografi
   const [driveMode, setDriveMode] = useState(false);
+  // Harita sekmesindeki hız rozeti: üstüne basınca geçici olarak büyür
+  const [speedBig, setSpeedBig] = useState(false);
   // YAPILACAKLAR3 #48: son bilinen konum (çevrimdışı / yenileme sonrası)
   const [lastKnown, setLastKnown] = useState<LastKnownState | null>(null);
 
@@ -261,7 +264,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const [riderName, setRiderName] = useState("");
   const [songPct, setSongPct] = useState<number | null>(null);
   const [songMsg, setSongMsg] = useState<string | null>(null);
-  // --- 10. madde: durak anonsu + ani fren (şoförden canlı gelir) ---
+  // Durak anonsu şoförden canlı gelir.
   const [announce, setAnnounce] = useState<StopAnnouncePayload | null>(null);
   // Durak tahmini oyunu: şoförün derlediği ortak sıralama
   const [guessBoard, setGuessBoard] = useState<GuessBoardRow[]>([]);
@@ -454,7 +457,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           | JourneyPayload
           | JourneyDeltaPayload
           | StopAnnouncePayload
-          | BrakeEventPayload
           | PingPayload
           | SongAckPayload
           | GuessBoardPayload;
@@ -490,9 +492,6 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
         else if (p?.type === "announce") {
           const a = p as StopAnnouncePayload;
           setAnnounce(a);
-        } else if (p?.type === "brake") {
-          const b = p as BrakeEventPayload;
-          if (b.level === "sert") vibrate([120, 60, 120]);
         } else if (p?.type === "guess-board") {
           const rows = (p as GuessBoardPayload).rows;
           if (Array.isArray(rows)) setGuessBoard(rows);
@@ -997,13 +996,18 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   const touchRef = useRef<{ x: number; y: number } | null>(null);
 
   const onTouchStart = (e: React.TouchEvent) => {
+    // Harita sekmesinde kaydırma ile sekme değiştirme kapalı
+    if (tab === 0) {
+      touchRef.current = null;
+      return;
+    }
     const t = e.touches[0]!;
     touchRef.current = { x: t.clientX, y: t.clientY };
   };
   const onTouchEnd = (e: React.TouchEvent) => {
     const start = touchRef.current;
     touchRef.current = null;
-    if (!start) return;
+    if (!start || tab === 0) return;
     const t = e.changedTouches[0]!;
     const dx = t.clientX - start.x;
     const dy = t.clientY - start.y;
@@ -1465,17 +1469,22 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
           </Suspense>
         </ClientOnly>
       </div>
-      <div className="absolute left-3 top-5 z-[500] flex h-12 w-12 flex-col items-center justify-center rounded-full border border-primary/50 bg-card/95 text-primary shadow-lg backdrop-blur">
-        <span className="text-base font-black leading-none">
+      <div
+        onClick={() => setSpeedBig((v) => !v)}
+        className={`absolute left-3 top-5 z-[500] flex flex-col items-center justify-center rounded-full border border-primary/50 bg-card/95 text-primary shadow-lg backdrop-blur cursor-pointer transition-all duration-200 ${speedBig ? "h-16 w-16" : "h-12 w-12"}`}
+      >
+        <span
+          className={`font-black leading-none transition-all duration-200 ${speedBig ? "text-2xl" : "text-base"}`}
+        >
           {dataStale ? "—" : Math.round(driver?.speedKmh ?? 0)}
         </span>
-        <span className="text-[8px] font-bold uppercase leading-none">km/s</span>
+        <span
+          className={`font-bold uppercase leading-none transition-all duration-200 ${speedBig ? "text-xs" : "text-[8px]"}`}
+        >
+          km/s
+        </span>
       </div>
-      <div className="absolute left-1/2 top-5 z-[500] flex h-12 -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-card/95 px-4 shadow-lg backdrop-blur">
-        <BusFront className="h-5 w-5 text-primary" aria-hidden="true" />
-        <span className="whitespace-nowrap text-base font-bold">{SERVICE_INFO.plate}</span>
-        <ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-      </div>
+      <DriverInfoBadge />
       <div className="absolute inset-x-0 bottom-0 z-[510] h-[9.5rem] bg-card/98 pt-3 shadow-[0_-12px_30px_oklch(0_0_0/0.25)]">
         <div className="mb-2 flex items-center justify-between px-4 text-[10px] font-mono text-muted-foreground">
           <span>

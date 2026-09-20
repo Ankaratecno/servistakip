@@ -3,11 +3,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 import type { RadioStatePayload } from "@/lib/radio";
 import { loadBuffer, playJingle } from "@/lib/jingle";
-import {
-  hourAnnouncementUrl,
-  randomJingleUrl,
-  requestAnnouncementUrl,
-} from "@/lib/voice-assets";
+import { hourAnnouncementUrl, randomJingleUrl, requestAnnouncementUrl } from "@/lib/voice-assets";
 import {
   onRadioAnnouncement,
   queueRadioAnnouncement,

@@ -141,7 +141,7 @@ export default function MapView({
       zoom: 12,
       zoomControl: false,
       attributionControl: true,
-      preferCanvas: true,
+      preferCanvas: false,
     });
 
     L.tileLayer(TILE_URL, {

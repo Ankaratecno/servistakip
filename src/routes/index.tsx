@@ -1446,7 +1446,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
   );
 
   const haritaTab = (
-    <div className="relative -mx-4 -mt-4 h-[calc(100dvh-3.75rem)] min-h-[520px] overflow-hidden bg-background">
+    <div className="relative h-[calc(100dvh-4rem-env(safe-area-inset-bottom))] min-h-[32rem] overflow-hidden bg-background">
       <div className="absolute inset-x-0 top-0 bottom-[9.5rem] overflow-hidden">
         <ClientOnly fallback={null}>
           <Suspense fallback={null}>
@@ -1613,7 +1613,7 @@ function PassengerApp({ onBack }: { onBack: () => void }) {
       )}
 
       <main
-        className="flex-1 w-full max-w-3xl mx-auto p-4 pb-28"
+        className={`flex-1 w-full max-w-3xl mx-auto ${tab === 0 ? "overflow-hidden p-0" : "p-4 pb-28"}`}
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >

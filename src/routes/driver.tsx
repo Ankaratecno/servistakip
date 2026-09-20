@@ -2,6 +2,7 @@ import { loadResume, saveResume, clearResume, type ResumePoint } from "@/lib/res
 import { usePassedStops, useTrimmedRoutePath } from "@/lib/passed-stops";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Bell, BusFront, Gauge, Map as MapIcon, Radio, Route as RouteIcon } from "lucide-react";
 import Peer, { type DataConnection } from "peerjs";
 import {
   PEER_OPTIONS,
@@ -16,12 +17,13 @@ import {
   type PingPayload,
   type PongPayload,
 } from "@/lib/peer-config";
-import { isWakeLockSupported, keepScreenAwake, releaseScreenAwake } from "@/lib/wake-lock";
+import { keepScreenAwake, releaseScreenAwake } from "@/lib/wake-lock";
 import { ClientOnly } from "@/components/ClientOnly";
+import { Button } from "@/components/ui/button";
 import { DRIVER_PEER_ID, SERVICE_INFO } from "@/lib/service-config";
 import { DRIVER_SESSION_KEY, checkDriverPassword } from "@/lib/driver-auth";
 import { getStops, type Stop } from "@/lib/stops";
-import { getRoute } from "@/lib/routing";
+import { formatEta, getRoute, getRouteEta, type RouteEtaResult } from "@/lib/routing";
 import {
   beep,
   playBase64Audio,
@@ -92,7 +94,6 @@ import {
 
 import {
   avgSpeedKmh,
-  accuracyLabel,
   loadStats,
   resetStats,
   saveStats,
@@ -107,11 +108,11 @@ import {
 const LIVE_WANT_KEY = "acrob-live-want";
 
 const DRIVER_TABS = [
-  { id: "rota", label: "Rota", icon: "🛣️" },
-  { id: "hiz", label: "Hız", icon: "⚡" },
-  { id: "radyo", label: "Radyo", icon: "📻" },
-  { id: "uyari", label: "Uyarı", icon: "🔔" },
-  { id: "harita", label: "Harita", icon: "🗺️" },
+  { id: "harita", label: "Harita", icon: MapIcon },
+  { id: "rota", label: "Rota", icon: RouteIcon },
+  { id: "radyo", label: "Radyo", icon: Radio },
+  { id: "hiz", label: "Hız", icon: Gauge },
+  { id: "uyari", label: "Uyarı", icon: Bell },
 ] as const;
 
 const MapView = lazy(() => import("@/components/MapView"));
@@ -221,6 +222,17 @@ interface PositionPayload {
   ts: number;
 }
 
+/**
+ * Yolcu sayısı: bağlantı nesnesi değil, benzersiz yolcu kimliği sayılır.
+ * Aynı yolcu kopup yeniden bağlandığında eski (kapanmış) bağlantılar sayıya
+ * girmesin diye hem kapalı bağlantılar elenir hem de peer kimliği tekilleştirilir.
+ */
+function countLivePeers(conns: Iterable<{ peer: string; open?: boolean }>): number {
+  const ids = new Set<string>();
+  for (const c of conns) if (c.open !== false) ids.add(c.peer);
+  return ids.size;
+}
+
 function DriverApp() {
   const [tab, setTab] = useState(0);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -257,6 +269,8 @@ function DriverApp() {
     [riders, allStops],
   );
   const [routePath, setRoutePath] = useState<[number, number][] | null>(null);
+  const [selectedMapStopId, setSelectedMapStopId] = useState<string | null>(null);
+  const [mapStopEtas, setMapStopEtas] = useState<Record<string, RouteEtaResult>>({});
   const [stats, setStats] = useState<TripStats>(EMPTY_STATS);
   const [liveSpeed, setLiveSpeed] = useState(0);
   const [liveHeading, setLiveHeading] = useState<number | null>(null);
@@ -270,7 +284,7 @@ function DriverApp() {
   const toastTimerRef = useRef<number | null>(null);
   // Uyarı sekmesi açıldığında rozet sıfırlanır
   useEffect(() => {
-    if (tab === 3) setUnreadAlerts(0);
+    if (tab === 4) setUnreadAlerts(0);
   }, [tab]);
   const [day, setDay] = useState<DayLog | null>(null);
   const dayRef = useRef<DayLog | null>(null);
@@ -372,6 +386,38 @@ function DriverApp() {
   const activeStops = useMemo(() => stops.filter((s) => !passedIds.has(s.id)), [stops, passedIds]);
   // 17. madde: rota kırpma artık throttle'lı ve son indeksten devam ediyor
   const activeRoutePath = useTrimmedRoutePath(routePath, busPos);
+
+  useEffect(() => {
+    const visibleStops = stops.filter((stop) => stop.kind === "stop");
+    if (!visibleStops.some((stop) => stop.id === selectedMapStopId)) {
+      setSelectedMapStopId(visibleStops[0]?.id ?? null);
+    }
+  }, [stops, selectedMapStopId]);
+
+  // Yolcu ekranıyla aynı güzergâh servisini kullan: ara duraklar ve bekleme süreleri dahildir.
+  useEffect(() => {
+    if (!busPos || stops.length === 0) {
+      setMapStopEtas({});
+      return;
+    }
+    let cancelled = false;
+    const visibleStops = stops.filter((stop) => stop.kind === "stop");
+    void Promise.all(
+      visibleStops.map(
+        async (stop) => [stop.id, await getRouteEta(busPos, stops, stop.id)] as const,
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const next: Record<string, RouteEtaResult> = {};
+      results.forEach(([id, result]) => {
+        if (result) next[id] = result;
+      });
+      setMapStopEtas(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [busPos?.lat, busPos?.lng, stops]);
   // D bölümü (#32/#36/#37): yol mesafesi + sıradaki durak + geçilince kilit sıfırlama
   const passedRef = useRef<Set<string>>(new Set());
   passedRef.current = passedIds;
@@ -803,8 +849,20 @@ function DriverApp() {
     });
 
     peer.on("connection", (conn) => {
+      // Aynı yolcu yeniden bağlandıysa eski bağlantısını kapat (mükerrer sayım).
+      connectionsRef.current.forEach((old) => {
+        if (old !== conn && old.peer === conn.peer) {
+          connectionsRef.current.delete(old);
+          iceStopRef.current.get(old.peer)?.();
+          try {
+            old.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
       connectionsRef.current.add(conn);
-      setConnCount(connectionsRef.current.size);
+      setConnCount(countLivePeers(connectionsRef.current));
       lastPongRef.current.set(conn.peer, Date.now());
       // #17: bağlantıyı temizleyen tek giriş noktası
       const dropConn = () => {
@@ -813,7 +871,7 @@ function DriverApp() {
         lastPongRef.current.delete(conn.peer);
         forgetPeer(conn.peer);
         connectionsRef.current.delete(conn);
-        setConnCount(connectionsRef.current.size);
+        setConnCount(countLivePeers(connectionsRef.current));
         setRiders((prev) => prev.filter((r) => r.peerId !== conn.peer));
         try {
           conn.close();
@@ -935,7 +993,7 @@ function DriverApp() {
         if (p?.type !== "alert") return;
         setAlerts((prev) => [p, ...prev].slice(0, 20));
         // Uyarı sekmesi açık değilse okunmamış sayacı artar (rozet)
-        if (tabRef.current !== 3) setUnreadAlerts((n) => Math.min(n + 1, 99));
+        if (tabRef.current !== 4) setUnreadAlerts((n) => Math.min(n + 1, 99));
         setAlertToast(p);
         if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
         toastTimerRef.current = window.setTimeout(() => setAlertToast(null), 7000);
@@ -1065,7 +1123,14 @@ function DriverApp() {
           /* ignore */
         }
       });
-      setConnCount(connectionsRef.current.size);
+      setConnCount(countLivePeers(connectionsRef.current));
+      // Bağlantısı düşen yolcular "takip eden duraklar" listesinden de silinir.
+      const alive = new Set(Array.from(connectionsRef.current).map((c) => c.peer));
+      setRiders((prev) =>
+        prev.length === prev.filter((r) => alive.has(r.peerId)).length
+          ? prev
+          : prev.filter((r) => alive.has(r.peerId)),
+      );
     }, PING_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, [running]);
@@ -1361,6 +1426,11 @@ function DriverApp() {
   }, []);
 
   const speedKmh = liveSpeed;
+  const selectedMapStopEta = useMemo(() => {
+    if (!selectedMapStopId) return {};
+    const eta = mapStopEtas[selectedMapStopId];
+    return eta ? { [selectedMapStopId]: formatEta(eta.durationS).text } : {};
+  }, [mapStopEtas, selectedMapStopId]);
 
   const onTouchStart = (event: React.TouchEvent<HTMLElement>) => {
     const target = event.target as HTMLElement;
@@ -1379,7 +1449,7 @@ function DriverApp() {
     if (!touch) return;
     const deltaX = touch.clientX - startPoint.x;
     const deltaY = touch.clientY - startPoint.y;
-    if (Math.abs(deltaX) < 55 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.25) return;
+    if (Math.abs(deltaX) < 60 || Math.abs(deltaX) < Math.abs(deltaY) * 1.5) return;
     setTab((current) =>
       deltaX < 0 ? Math.min(current + 1, DRIVER_TABS.length - 1) : Math.max(current - 1, 0),
     );
@@ -1387,7 +1457,9 @@ function DriverApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="border-b border-border bg-card/50 backdrop-blur">
+      <header
+        className={`border-b border-border bg-card/50 backdrop-blur ${running && tab !== 1 ? "hidden" : "block"}`}
+      >
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center gap-3">
           <Link to="/" className="hud-label hover:text-primary">
             ← Ana Sayfa
@@ -1408,7 +1480,11 @@ function DriverApp() {
       </header>
 
       <main
-        className={`flex-1 max-w-5xl w-full mx-auto p-4 flex flex-col gap-4 ${running ? "pb-28" : ""}`}
+        className={`flex-1 w-full mx-auto flex flex-col ${
+          running && tab === 0
+            ? "max-w-none gap-0 overflow-hidden p-0"
+            : `max-w-5xl gap-4 p-4 ${running ? "pb-28" : ""}`
+        }`}
         onTouchStart={running ? onTouchStart : undefined}
         onTouchEnd={running ? onTouchEnd : undefined}
       >
@@ -1499,38 +1575,39 @@ function DriverApp() {
           </div>
         ) : (
           <>
-            <div className="panel p-5 flex items-center gap-4">
-              <div
-                className={`w-3 h-3 rounded-full ${signalOk && netOnline ? "bg-primary animate-pulse" : "bg-red-500"}`}
-              />
-              <div className="flex-1">
-                <div className="hud-label">Durum</div>
-                <div className="font-bold">
+            <div
+              className={
+                tab === 1
+                  ? "grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-border pb-3"
+                  : "hidden"
+              }
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <span
+                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${signalOk && netOnline ? "bg-primary animate-pulse" : "bg-red-500"}`}
+                />
+                <span className="truncate text-xs font-bold uppercase">
                   {!netOnline
-                    ? "İNTERNET YOK · ağ gelince otomatik bağlanacak"
+                    ? "İnternet yok"
                     : recovering
-                      ? `BAĞLANTI KOPTU · otomatik yeniden kuruluyor (${signalRetry})`
+                      ? "Bağlantı yenileniyor"
                       : !signalOk
-                        ? `SİNYAL KOPTU · yeniden bağlanılıyor (${signalRetry})`
-                        : `YAYINDA · ${SERVICE_INFO.plate}`}
-                </div>
-                <div className="text-[11px] text-muted-foreground">
-                  Yayın otomatik korunur; kapatmak için "Durdur".
-                </div>
+                        ? "Sinyal yenileniyor"
+                        : `Yayında · ${SERVICE_INFO.plate}`}
+                </span>
               </div>
-              <div className="text-right">
-                <div className="hud-label">Yolcu</div>
-                <div className="text-2xl font-mono font-bold text-primary">{connCount}</div>
-              </div>
+              <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                {connCount} yolcu
+              </span>
               <button
                 onClick={stopBroadcast}
-                className="bg-destructive text-destructive-foreground px-4 py-2 rounded-md font-semibold hover:bg-destructive/90"
+                className="shrink-0 rounded-md bg-destructive px-3 py-2 text-xs font-semibold text-destructive-foreground hover:bg-destructive/90"
               >
                 Durdur
               </button>
             </div>
 
-            <div className="flex items-center justify-between mt-1">
+            <div className={tab === 0 ? "hidden" : "flex items-center justify-between mt-1"}>
               <div className="hud-label">{DRIVER_TABS[tab]?.label}</div>
               <div className="flex items-center gap-1.5" aria-hidden="true">
                 {DRIVER_TABS.map((item, index) => (
@@ -1545,7 +1622,7 @@ function DriverApp() {
             </div>
 
             {/* SERVİSTE: hangi durakta kaç yolcu takip ediyor */}
-            <div className={tab === 0 ? "panel p-4 animate-in fade-in duration-200" : "hidden"}>
+            <div className={tab === 1 ? "panel p-4 animate-in fade-in duration-200" : "hidden"}>
               <div className="flex items-center justify-between mb-2">
                 <div className="hud-label">Serviste · takip eden duraklar</div>
                 <div className="text-xs font-mono text-muted-foreground">{riders.length} yolcu</div>
@@ -1567,74 +1644,7 @@ function DriverApp() {
               )}
             </div>
 
-            {/* YAPILACAKLAR3 #49: yayın sağlığı – tek bakışta her şey */}
-            <div
-              className={
-                tab === 4
-                  ? "panel px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-mono animate-in fade-in duration-200"
-                  : "hidden"
-              }
-            >
-              <HealthItem
-                label="GPS"
-                value={position ? `±${Math.round(position.coords.accuracy)} m` : "yok"}
-                ok={Boolean(position) && (position?.coords.accuracy ?? 999) <= 35}
-                warn={Boolean(position) && (position?.coords.accuracy ?? 999) <= 90}
-              />
-              <HealthItem
-                label="Fix yaşı"
-                value={fixAgeMs == null ? "—" : `${Math.round(fixAgeMs / 1000)} sn`}
-                ok={fixAgeMs != null && fixAgeMs < 5000}
-                warn={fixAgeMs != null && fixAgeMs < 15000}
-              />
-              <HealthItem
-                label="Sinyal"
-                value={!netOnline ? "internet yok" : signalOk ? "bağlı" : `yeniden ${signalRetry}`}
-                ok={netOnline && signalOk}
-              />
-              <HealthItem label="Yolcu" value={`${connCount}`} ok={connCount > 0} warn />
-              <HealthItem
-                label="Röle"
-                value={
-                  relayStatus === "ok"
-                    ? "hazır"
-                    : relayStatus === "checking"
-                      ? "kontrol…"
-                      : relayStatus === "unavailable"
-                        ? "yok"
-                        : "—"
-                }
-                ok={relayStatus === "ok"}
-                warn={relayStatus === "checking" || relayStatus === "unknown"}
-              />
-              {/* #65: yolcu bağlantılarının gecikmesi ve röle kullanımı */}
-              <HealthItem
-                label="Gecikme"
-                value={
-                  connCount === 0
-                    ? "—"
-                    : `${linkQuality.rttMs == null ? "ölçülüyor" : `${linkQuality.rttMs} ms`}${
-                        linkQuality.relay > 0 ? ` · ${linkQuality.relay} röle` : " · doğrudan"
-                      }`
-                }
-                ok={linkQuality.rttMs != null && linkQuality.rttMs < 200}
-                warn={linkQuality.rttMs == null || linkQuality.rttMs < 500}
-              />
-              <HealthItem
-                label="Radyo"
-                value={`${radioAudio.listening}/${radioAudio.receiving} dinliyor`}
-                ok={radioAudio.listening > 0}
-                warn
-              />
-              <HealthItem
-                label="Ekran"
-                value={awake ? "açık tutuluyor" : "kilitlenebilir"}
-                ok={awake}
-                warn
-              />
-            </div>
-
-            <div className={tab === 0 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
+            <div className={tab === 1 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
               <StopPlanner
                 realStops={realStops}
                 startStopId={startStopId}
@@ -1649,7 +1659,7 @@ function DriverApp() {
 
             <div
               className={
-                tab === 1 ? "grid grid-cols-2 gap-4 animate-in fade-in duration-200" : "hidden"
+                tab === 3 ? "grid grid-cols-2 gap-4 animate-in fade-in duration-200" : "hidden"
               }
             >
               <div className="panel p-5">
@@ -1667,7 +1677,7 @@ function DriverApp() {
               </div>
             </div>
 
-            <div className={tab === 1 ? "block animate-in fade-in duration-200" : "hidden"}>
+            <div className={tab === 3 ? "block animate-in fade-in duration-200" : "hidden"}>
               <WeatherCard
                 position={
                   position
@@ -1677,7 +1687,7 @@ function DriverApp() {
               />
             </div>
 
-            <div className={tab === 1 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
+            <div className={tab === 3 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
               <div className="flex items-center justify-between mb-3">
                 <div className="hud-label">Kalıcı Sürüş Sayacı (cihazda saklanır)</div>
                 <button
@@ -1721,7 +1731,7 @@ function DriverApp() {
             </div>
 
             {/* 10. madde: durak anonsu + ani fren */}
-            <div className={tab === 3 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
+            <div className={tab === 4 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
               <div className="flex items-center justify-between mb-3">
                 <div className="hud-label">Durak Anonsu & Ani Fren</div>
                 <span className="text-[11px] font-mono text-muted-foreground">
@@ -1810,7 +1820,7 @@ function DriverApp() {
               </Suspense>
             </div>
 
-            <div className={tab === 3 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
+            <div className={tab === 4 ? "panel p-5 animate-in fade-in duration-200" : "hidden"}>
               <div className="flex items-center justify-between mb-3">
                 <div className="hud-label">Yolcu Uyarıları (sesli)</div>
                 {alerts.length > 0 && (
@@ -1871,80 +1881,94 @@ function DriverApp() {
             {/* Harita sekme değişiminde kaldırılmaz; yalnızca gizlenir (yeniden yüklenme yok). */}
             <div
               className={
-                tab === 4
-                  ? "panel overflow-hidden h-[70vh] min-h-[420px] animate-in fade-in duration-200"
+                tab === 0
+                  ? "relative h-[calc(100dvh-4rem-env(safe-area-inset-bottom))] min-h-[32rem] overflow-hidden bg-background animate-in fade-in duration-200"
                   : "hidden"
               }
             >
-              <Suspense fallback={null}>
-                <MapView
-                  stops={activeStops}
-                  busPosition={busPos}
-                  routePath={activeRoutePath}
-                  busHeading={liveHeading}
-                  busSpeedKmh={liveSpeed}
-                  busIconUrl={busDriverIcon}
-                  className="h-full min-h-[400px]"
-                />
-              </Suspense>
-            </div>
-
-            <div
-              className={
-                tab === 4
-                  ? "panel px-4 py-3 flex items-center gap-3 text-sm animate-in fade-in duration-200"
-                  : "hidden"
-              }
-            >
-              <div
-                className={`w-2.5 h-2.5 rounded-full ${peerReady ? "bg-primary animate-pulse" : "bg-yellow-500 animate-pulse"}`}
-              />
-              <span className="font-semibold uppercase tracking-wider">
-                {peerReady ? `Yayın açık · ${connCount} yolcu` : "Bağlanıyor"}
-              </span>
-              <span className="ml-auto hud-label">
-                {awake
-                  ? "Ekran açık tutuluyor"
-                  : isWakeLockSupported()
-                    ? "Ekran kilidi alınamadı"
-                    : "Ekran kilidi desteklenmiyor"}
-              </span>
-            </div>
-
-            {(() => {
-              const acc = accuracyLabel(position?.coords.accuracy);
-              return (
-                <div
-                  className={
-                    tab === 4
-                      ? "panel px-4 py-3 flex items-center gap-3 text-sm animate-in fade-in duration-200"
-                      : "hidden"
-                  }
-                >
-                  <div
-                    className={`w-2.5 h-2.5 rounded-full ${acc.level === "iyi" ? "bg-primary" : acc.level === "zayıf" ? "bg-yellow-500" : "bg-red-500"}`}
+              <div className="absolute inset-x-0 top-0 bottom-[9.5rem] overflow-hidden">
+                <Suspense fallback={null}>
+                  <MapView
+                    stops={activeStops}
+                    busPosition={busPos}
+                    routePath={activeRoutePath}
+                    busHeading={liveHeading}
+                    busSpeedKmh={liveSpeed}
+                    busIconUrl={busDriverIcon}
+                    selectedStopId={selectedMapStopId}
+                    stopEta={selectedMapStopEta}
+                    active={tab === 0}
+                    className="h-full"
                   />
-                  <span className="font-mono">{acc.text}</span>
-                  {running && fixAgeMs != null && (
-                    <span
-                      className={`font-mono text-xs ${fixAgeMs > 10000 ? "text-yellow-500" : "text-muted-foreground"}`}
-                    >
-                      fix {Math.round(fixAgeMs / 1000)} sn
-                    </span>
-                  )}
-                  {calibrating && (
-                    <span className="font-mono text-xs text-yellow-500">kalibre ediliyor…</span>
-                  )}
-                  {gpsWarn && <span className="ml-auto text-right text-red-400">{gpsWarn}</span>}
-                </div>
-              );
-            })()}
-
-            {!peerReady && tab === 4 && (
-              <div className="text-center text-sm text-muted-foreground">
-                PeerJS sunucusuna bağlanılıyor...
+                </Suspense>
               </div>
-            )}
+              <div className="pointer-events-none absolute left-1/2 top-5 z-[500] -translate-x-1/2">
+                <div className="flex h-12 items-center gap-2 rounded-full border border-border bg-card/95 px-4 shadow-lg backdrop-blur">
+                  <BusFront className="h-5 w-5 text-primary" aria-hidden="true" />
+                  <span className="whitespace-nowrap text-base font-bold">{SERVICE_INFO.plate}</span>
+                </div>
+              </div>
+              <div className="pointer-events-none absolute left-3 top-5 z-[500] flex h-12 w-12 flex-col items-center justify-center rounded-full border border-primary/50 bg-card/95 text-primary shadow-lg backdrop-blur">
+                <span className="text-base font-black leading-none">{Math.round(speedKmh)}</span>
+                <span className="text-[8px] font-bold uppercase leading-none">km/s</span>
+              </div>
+              <div className="absolute inset-x-0 bottom-0 z-[510] h-[9.5rem] bg-card/98 pt-3 shadow-[0_-12px_30px_oklch(0_0_0/0.25)]">
+                <div className="mb-2 flex items-center justify-between px-4 text-[10px] font-mono text-muted-foreground">
+                  <span>
+                    {stops
+                      .filter((stop) => stop.kind === "stop")
+                      .findIndex((stop) => stop.id === selectedMapStopId) + 1 || 1}{" "}
+                    / {stops.filter((stop) => stop.kind === "stop").length}
+                  </span>
+                  <span className={signalOk && netOnline ? "text-live" : ""}>
+                    {signalOk && netOnline ? "CANLI" : "KONUM BEKLENİYOR"}
+                  </span>
+                </div>
+                <div
+                  className="flex touch-pan-x snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain px-4 pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                  onTouchStart={(event) => event.stopPropagation()}
+                  onTouchEnd={(event) => event.stopPropagation()}
+                >
+                  {stops
+                    .filter((stop) => stop.kind === "stop")
+                    .map((stop, index) => {
+                      const stopEta = mapStopEtas[stop.id];
+                      const stopEtaText = stopEta ? formatEta(stopEta.durationS) : null;
+                      const selected = stop.id === selectedMapStopId;
+                      return (
+                        <Button
+                          key={stop.id}
+                          type="button"
+                          variant="ghost"
+                          onClick={() => setSelectedMapStopId(stop.id)}
+                          className={`h-[5.5rem] w-[78vw] max-w-[19rem] shrink-0 snap-center items-stretch justify-start rounded-lg px-4 py-3 text-left shadow-sm transition ${
+                            selected
+                              ? "border border-primary bg-card/90 ring-1 ring-primary/40 hover:bg-card/90 hover:text-foreground active:bg-card/90"
+                              : "border border-border bg-secondary/70 hover:bg-card/60 hover:text-foreground active:bg-card/70"
+                          }`}
+                        >
+                          <span
+                            className={`mt-1 h-12 w-1 shrink-0 rounded-full ${selected ? "bg-primary" : "bg-muted"}`}
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-bold">
+                              {index + 1}. {stop.name}
+                            </span>
+                            <span className="mt-1 block text-lg font-black text-primary">
+                              {stopEtaText
+                                ? `${stopEtaText.minutes} dk ${stopEtaText.secs} sn`
+                                : "—"}
+                            </span>
+                            <span className="block text-[10px] text-muted-foreground">
+                              Tahmini varış süresi
+                            </span>
+                          </span>
+                        </Button>
+                      );
+                    })}
+                </div>
+              </div>
+            </div>
           </>
         )}
       </main>
@@ -1953,7 +1977,7 @@ function DriverApp() {
         <button
           type="button"
           onClick={() => {
-            setTab(3);
+            setTab(4);
             setAlertToast(null);
           }}
           className="fixed inset-x-2 bottom-[76px] z-50 flex items-center gap-3 rounded-lg border border-primary/60 bg-card/95 px-4 py-3 text-left shadow-lg backdrop-blur animate-in fade-in slide-in-from-bottom-2"
@@ -1977,6 +2001,7 @@ function DriverApp() {
           <div className="max-w-5xl mx-auto grid grid-cols-5">
             {DRIVER_TABS.map((item, index) => {
               const active = index === tab;
+              const Icon = item.icon;
               return (
                 <button
                   key={item.id}
@@ -1992,9 +2017,7 @@ function DriverApp() {
                     active ? "text-primary" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <span className="text-lg leading-none" aria-hidden="true">
-                    {item.icon}
-                  </span>
+                  <Icon className="h-5 w-5" aria-hidden="true" />
                   <span className="w-full truncate px-1">{item.label}</span>
                   {item.id === "radyo" && radioStreamRef.current && (
                     <span className="absolute top-1.5 right-1/2 translate-x-4 live-dot" />
@@ -2100,23 +2123,3 @@ function StopPlanner({
   );
 }
 
-/** YAPILACAKLAR3 #49: yayın sağlığı satırındaki tek gösterge. */
-function HealthItem({
-  label,
-  value,
-  ok,
-  warn = false,
-}: {
-  label: string;
-  value: string;
-  ok: boolean;
-  warn?: boolean;
-}) {
-  const color = ok ? "text-primary" : warn ? "text-amber-400" : "text-red-400";
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="text-muted-foreground uppercase tracking-wider">{label}</span>
-      <span className={`font-bold ${color}`}>{value}</span>
-    </span>
-  );
-}

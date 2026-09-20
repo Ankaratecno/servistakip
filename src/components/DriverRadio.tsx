@@ -7,8 +7,6 @@ import {
   hourAnnouncementUrl,
   randomJingleUrl,
   requestAnnouncementUrl,
-  stopAnnouncement,
-  type StopAnnouncementKey,
 } from "@/lib/voice-assets";
 import {
   onRadioAnnouncement,
@@ -92,9 +90,9 @@ export default function DriverRadio({
   const [volume, setVolume] = useState(0.8);
   const [monitor, setMonitor] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [jingleOn, setJingleOn] = useState(true);
-  const [jingleEvery, setJingleEvery] = useState(3);
-  const [hourlyOn, setHourlyOn] = useState(true);
+  const jingleOn = true;
+  const jingleEvery = 3;
+  const hourlyOn = true;
   const [onAir, setOnAir] = useState<string | null>(null);
   // Yolcu istek şarkıları (P2P ile gelen dosyalar)
   const [queue, setQueue] = useState<SongRequest[]>([]);
@@ -804,8 +802,6 @@ export default function DriverRadio({
     [],
   );
 
-  const playStationId = () => void runJingle(randomJingleUrl(), false, "🎙 ELEKTRO RADYO");
-
   const playHourAnnouncement = async () => {
     await runJingle(hourAnnouncementUrl(), true, "🕐 SAAT ANONSU");
   };
@@ -1138,114 +1134,6 @@ export default function DriverRadio({
         />
         Müziği kendi telefonumdan da duy
       </label>
-
-      <div className="mt-4 rounded-md border border-border p-3">
-        <div className="hud-label mb-2">Jingle & Anonslar</div>
-        <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
-          <input
-            type="checkbox"
-            checked={jingleOn}
-            onChange={(e) => setJingleOn(e.target.checked)}
-            className="w-4 h-4 accent-primary"
-          />
-          "Elektro Radyo" jingle çalsın
-        </label>
-        <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
-          <span>Her</span>
-          <select
-            value={jingleEvery}
-            onChange={(e) => setJingleEvery(Number(e.target.value))}
-            className="bg-transparent border border-border rounded px-2 py-1 text-foreground"
-            aria-label="Jingle sıklığı"
-          >
-            <option value={2}>2</option>
-            <option value={3}>3</option>
-            <option value={4}>4</option>
-            <option value={5}>5</option>
-          </select>
-          <span>şarkıda bir</span>
-        </div>
-        <label className="flex items-center gap-2 mt-2 text-xs text-muted-foreground cursor-pointer">
-          <input
-            type="checkbox"
-            checked={hourlyOn}
-            onChange={(e) => setHourlyOn(e.target.checked)}
-            className="w-4 h-4 accent-primary"
-          />
-          Saat başı anonsu ("Saat 09:00, Acrob Servis Radyosu")
-        </label>
-        <div className="grid grid-cols-2 gap-2 mt-3">
-          <button
-            onClick={playStationId}
-            className="py-2 rounded-md border border-border font-semibold text-sm hover:bg-muted/50"
-          >
-            🎙 Jingle Çal
-          </button>
-          <button
-            onClick={() => void playHourAnnouncement()}
-            className="py-2 rounded-md border border-border font-semibold text-sm hover:bg-muted/50"
-          >
-            🕐 Saat Anonsu
-          </button>
-        </div>
-        <div className="hud-label mt-4 mb-2">Hızlı Uyarı</div>
-        <div className="grid grid-cols-1 gap-2">
-          <div className="flex gap-2">
-            <button
-              onClick={() => queueRadioAnnouncement(stopAnnouncement("notToday"))}
-              className="flex-1 py-2 rounded-md border border-destructive/40 text-destructive font-semibold text-xs hover:bg-destructive/10 text-left px-3"
-            >
-              ⚠️ Bugün Yokum
-              <span className="block text-[10px] font-normal text-muted-foreground">
-                "Servisimiz bugün çalışmayacaktır" · şarkı bitince yayına girer
-              </span>
-            </button>
-            <button
-              onClick={() => queueRadioAnnouncement(stopAnnouncement("notToday", true))}
-              className="px-3 rounded-md border border-destructive/40 text-destructive text-xs font-semibold hover:bg-destructive/10"
-              aria-label="Bugün Yokum hemen çal"
-            >
-              Hemen
-            </button>
-          </div>
-        </div>
-        <div className="hud-label mt-4 mb-2">
-          Durak Anonsları — konuma göre otomatik çalar (elle de çalabilirsiniz)
-        </div>
-        <div className="grid grid-cols-1 gap-2">
-          {(
-            [
-              ["bakery2min", "🥐 25 Saat Fırın · 2 dk kala"],
-              ["bakeryNear", "🥐 25 Saat Fırın · yaklaşıyoruz + espri"],
-              ["factory", "🏭 Eloktroland · vardık"],
-            ] as [StopAnnouncementKey, string][]
-          ).map(([key, label]) => (
-            <div key={key} className="flex gap-2">
-              <button
-                onClick={() => queueRadioAnnouncement(stopAnnouncement(key))}
-                className="flex-1 py-2 rounded-md border border-border font-semibold text-xs hover:bg-muted/50 text-left px-3"
-              >
-                {label}
-                <span className="block text-[10px] font-normal text-muted-foreground">
-                  şarkı bitince yayına girer
-                </span>
-              </button>
-              <button
-                onClick={() => queueRadioAnnouncement(stopAnnouncement(key, true))}
-                className="px-3 rounded-md border border-border text-xs font-semibold hover:bg-muted/50"
-                aria-label={`${label} hemen çal`}
-              >
-                Hemen
-              </button>
-            </div>
-          ))}
-        </div>
-        {announceQueueRef.current.length > 0 ? (
-          <div className="text-[11px] text-muted-foreground mt-2">
-            {announceQueueRef.current.length} anons sırada
-          </div>
-        ) : null}
-      </div>
 
       <div className="mt-4 rounded-md border border-border p-3">
         <div className="flex items-center justify-between mb-2">
